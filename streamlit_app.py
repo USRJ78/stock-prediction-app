@@ -21,6 +21,15 @@ st.set_page_config(page_title="Universal Market App", layout="wide")
 if "premium_users" not in st.session_state:
     st.session_state.premium_users = set()
 
+# Check for payment success from Stripe redirect
+# When Stripe redirects back to http://your-app-url/?success=true
+query_params = st.query_params
+if "success" in query_params and query_params["success"] == "true":
+    # If the user's email is in session state, add it to premium
+    if "premium_email" in st.session_state:
+        st.session_state.premium_users.add(st.session_state.premium_email)
+        st.success("Payment Successful! Premium features unlocked.")
+
 st.title("📊 Universal Stock & ETF Portfolio App")
 st.markdown("Search by **name or ticker**, allocate capital, and run portfolio simulations.")
 
@@ -363,14 +372,34 @@ if st.session_state.run_analysis:
                 st.markdown("- Confidence Intervals")
                 st.markdown("- AI Recommendations")
                 
-                if st.button(f"Subscribe for $9.99/mo (Simulated Payment)"):
-                    with st.spinner("Processing secure payment..."):
-                        import time
-                        time.sleep(1.5) # Simulate delay
-                    st.session_state.premium_users.add(email)
-                    st.balloons()
-                    st.success("Payment Successful! Premium features unlocked.")
-                    st.rerun()
+                # STRIPE INTEGRATION
+                # Replace 'https://buy.stripe.com/test_...' with your actual Stripe Payment Link
+                stripe_payment_link = "https://buy.stripe.com/test_123456789" 
+                
+                st.markdown(f"""
+                    <a href="{stripe_payment_link}" target="_blank">
+                        <button style="
+                            background-color: #635bff; 
+                            color: white; 
+                            padding: 10px 20px; 
+                            border: none; 
+                            border-radius: 5px; 
+                            cursor: pointer;
+                            font-weight: bold;">
+                            Subscribe for $9.99/mo via Stripe
+                        </button>
+                    </a>
+                    <p style="font-size: 0.8em; color: gray; margin-top: 5px;">
+                        (After payment, you will be redirected back here to unlock features)
+                    </p>
+                """, unsafe_allow_html=True)
+                
+                # Keep the mock button for testing if needed, or remove it. 
+                # For now, let's comment it out or leave it as a "Dev Bypass"
+                with st.expander("Developer Override (Mock Payment)"):
+                    if st.button(f"Simulate Successful Payment"):
+                         st.session_state.premium_users.add(email)
+                         st.rerun()
             else:
                 st.success(f"✅ Premium Active for {email}")
                 
