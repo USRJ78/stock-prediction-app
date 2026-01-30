@@ -1,4 +1,5 @@
-# (Updated code with Razorpay integration)
+# (Updated code without rapidfuzz)
+# Uses difflib instead of rapidfuzz to avoid extra dependencies
 
 import streamlit as st
 import yfinance as yf
@@ -11,41 +12,23 @@ import seaborn as sns
 from difflib import get_close_matches
 from utils import advanced_ai_prediction
 from datetime import date
+import requests
 import hashlib
-import razorpay
-import json
-import time
 
 st.set_page_config(page_title="Universal Market App", layout="wide")
 
-# Mock database of premium users (in-memory → resets on redeploy/sleep)
+# Mock database of premium users
 if "premium_users" not in st.session_state:
     st.session_state.premium_users = set()
 
-# ─── Razorpay Configuration ───────────────────────────────────────
-# Add these to Streamlit Cloud → Settings → Secrets management
-# Format:
-# RAZORPAY_KEY_ID = "rzp_test_xxxxxxxxxxxxxx"
-# RAZORPAY_KEY_SECRET = "xxxxxxxxxxxxxxxxxxxxxxxx"
-try:
-    RAZORPAY_KEY_ID = st.secrets["RAZORPAY_KEY_ID"]
-    RAZORPAY_KEY_SECRET = st.secrets["RAZORPAY_KEY_SECRET"]
-    RAZORPAY_CLIENT = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
-except Exception:
-    st.error("Razorpay secrets not configured. Please add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Streamlit Cloud secrets.")
-    RAZORPAY_CLIENT = None
-
-SUBSCRIPTION_AMOUNT   = 99900       # paise → ₹999 (change as needed)
-SUBSCRIPTION_CURRENCY = "INR"
-SUBSCRIPTION_NAME     = "Universal Market App Premium"
-SUBSCRIPTION_DESC     = "AI Predictions + Advanced Features"
-
-# Check for payment success simulation (optional dev tool)
+# Check for payment success from Stripe redirect
+# When Stripe redirects back to http://your-app-url/?success=true
 query_params = st.query_params
-if "dev_premium" in query_params and query_params["dev_premium"] == "true":
+if "success" in query_params and query_params["success"] == "true":
+    # If the user's email is in session state, add it to premium
     if "premium_email" in st.session_state:
         st.session_state.premium_users.add(st.session_state.premium_email)
-        st.success("Dev mode: Premium activated!")
+        st.success("Payment Successful! Premium features unlocked.")
 
 st.title("📊 Universal Stock & ETF Portfolio App")
 st.markdown("Search by **name or ticker**, allocate capital, and run portfolio simulations.")
@@ -53,19 +36,20 @@ st.markdown("Search by **name or ticker**, allocate capital, and run portfolio s
 # ============================
 # ✅ Premium AI Config
 # ============================
-API_URL = "https://universal-market-app-1.onrender.com"  # change if needed
+API_URL = "https://universal-market-app-1.onrender.com"  # change to your deployed backend URL later
 
 def user_id_from_email(email: str) -> str:
     return hashlib.md5(email.strip().lower().encode()).hexdigest()
 
-# Run-state fix
+# ------------------ Run-state fix (graphs update with date changes) ------------------
 if "run_analysis" not in st.session_state:
     st.session_state.run_analysis = False
 
 def trigger_run():
     st.session_state.run_analysis = True
 
-# Helpers (unchanged) ────────────────────────────────────────────────
+# ------------------ Helpers ------------------
+
 @st.cache_data(ttl=3600)
 def load_nse_stock_list():
     url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
@@ -119,7 +103,8 @@ def price_scaling(raw_prices_df):
         scaled_prices_df[i] = raw_prices_df[i] / raw_prices_df[i].iloc[0]
     return scaled_prices_df
 
-# Sidebar (unchanged except premium part) ────────────────────────────
+# ------------------ Sidebar ------------------
+
 st.sidebar.header("Inputs")
 
 @st.cache_data(ttl=3600)
@@ -181,9 +166,13 @@ num_sims = st.sidebar.number_input(
     on_change=trigger_run
 )
 
+# Keep your Run button
 if st.sidebar.button("Run Analysis", key="run_button"):
     st.session_state.run_analysis = True
 
+# ============================
+# 🔮 Premium AI Prediction (Sidebar)
+# ============================
 st.sidebar.markdown("---")
 st.sidebar.markdown("## 🔮 AI Prediction (Premium)")
 
@@ -195,12 +184,169 @@ horizon_map = {"1W": 5, "1M": 21, "3M": 63, "1Y": 252}
 horizon_label = st.sidebar.selectbox("Horizon", list(horizon_map.keys()), index=1, key="ai_horizon", on_change=trigger_run)
 horizon_days = horizon_map[horizon_label]
 
-# ─── Main App ───────────────────────────────────────────────────────
+# ------------------ Main ------------------
+
 if st.session_state.run_analysis:
-    # ... (your existing analysis code remains completely unchanged)
-    # I'll skip repeating the whole analysis block for brevity.
-    # Keep everything from:
-    #     if end_date <= start_date:   →   up to the end of Monte Carlo block
+
+    if end_date <= start_date:
+        st.error("❌ End Date must be after Start Date")
+        st.stop()
+
+    user_assets = list(selected_assets) + [x.strip() for x in manual_assets.split(",") if x.strip()]
+    if not user_assets:
+        st.error("❌ Please select or enter at least one asset")
+        st.stop()
+
+    resolved = resolve_assets(user_assets)
+
+    valid = {k: v for k, v in resolved.items() if v}
+    invalid = [k for k, v in resolved.items() if not v]
+
+    if invalid:
+        st.warning(f"⚠️ Could not resolve: {', '.join(invalid)}")
+
+    if not valid:
+        st.error("❌ No valid assets resolved")
+        st.stop()
+
+    st.subheader("Resolved Assets")
+    st.write(valid)
+
+    tickers = list(valid.values())
+
+    prices = load_prices(tickers, start_date, end_date)
+    if prices.empty:
+        st.error("❌ No price data fetched (try different dates / tickers)")
+        st.stop()
+
+    returns = prices.pct_change().dropna()
+
+    # -------- Allocation --------
+    weights = np.random.random(len(prices.columns))
+    weights /= weights.sum()
+    allocation = float(initial_amount) * weights
+
+    alloc_df = pd.DataFrame({
+        "Asset": prices.columns,
+        "Weight": weights,
+        "Allocation (INR)": allocation
+    })
+
+    st.subheader("💰 Portfolio Allocation")
+    st.dataframe(alloc_df)
+
+    # -------- Portfolio calcs --------
+    portfolio_positions = (prices / prices.iloc[0]) * allocation
+    portfolio_value = portfolio_positions.sum(axis=1)
+
+    portfolio_df = portfolio_positions.copy()
+    portfolio_df["Portfolio Value [$]"] = portfolio_value
+    portfolio_df["Portfolio Daily Return [%]"] = portfolio_value.pct_change() * 100
+    portfolio_df["Date"] = portfolio_df.index
+    portfolio_df = portfolio_df[["Date"] + [c for c in portfolio_df.columns if c != "Date"]]
+
+    # -------- Percentage Change (Scaled Prices) --------
+    st.subheader("📊 Percentage Change (Scaled Prices)")
+    scaled_prices_df = prices.copy()
+    scaled_prices_df["Date"] = scaled_prices_df.index
+    scaled_prices_df = scaled_prices_df[["Date"] + list(prices.columns)]
+    scaled_prices_df = price_scaling(scaled_prices_df)
+    plot_financial_data(scaled_prices_df, "Scaled Price Change (Base = 1.0)")
+
+    # -------- Price Movement (Actual Prices) --------
+    st.subheader("📈 Price Movement (Actual Prices)")
+    raw_prices_df = prices.copy()
+    raw_prices_df["Date"] = raw_prices_df.index
+    raw_prices_df = raw_prices_df[["Date"] + list(prices.columns)]
+    plot_financial_data(raw_prices_df, "Price Movement (Actual Prices)")
+
+    # -------- Portfolio Positions --------
+    st.subheader("💼 Portfolio Positions (INR)")
+    plot_financial_data(
+        portfolio_df.drop(['Portfolio Value [$]', 'Portfolio Daily Return [%]'], axis=1),
+        'Portfolio positions [$]'
+    )
+
+    # -------- Portfolio Value Over Time --------
+    st.subheader("💼 Total Portfolio Value Over Time")
+    plot_financial_data(
+        portfolio_df[['Date', 'Portfolio Value [$]']],
+        'Total Portfolio Value [$]'
+    )
+
+    # -------- Daily Returns --------
+    st.subheader("📉 Daily Returns (%)")
+    daily_returns_df = returns * 100
+    daily_returns_df["Date"] = daily_returns_df.index
+    daily_returns_df = daily_returns_df[["Date"] + list(returns.columns)]
+    plot_financial_data(daily_returns_df, 'Percentage Daily Returns [%]')
+
+    # -------- Heatmap --------
+    st.subheader("🔥 Correlation Heatmap")
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(daily_returns_df.drop(columns=['Date']).corr(), annot=True)
+    st.pyplot(plt.gcf())
+    plt.close()
+
+    # -------- Histogram --------
+    st.subheader("📊 Daily % Change Distribution (Histogram)")
+    fig = px.histogram(daily_returns_df.drop(columns=["Date"]))
+    fig.update_layout({'plot_bgcolor': "white"})
+    st.plotly_chart(fig, use_container_width=True)
+
+    # -------- Monte Carlo (your exact plot + optimal point) --------
+    if run_mc:
+        st.subheader("🎯 Monte Carlo Simulation")
+
+        mean_returns = returns.mean() * 252
+        cov = returns.cov() * 252
+
+        sim_results = []
+        weight_list = []
+
+        for _ in range(int(num_sims)):
+            w = np.random.random(len(prices.columns))
+            w /= w.sum()
+            weight_list.append(w)
+
+            port_return = float(np.dot(w, mean_returns))
+            port_vol = float(np.sqrt(np.dot(w.T, np.dot(cov, w))))
+            sharpe = (port_return / port_vol) if port_vol != 0 else np.nan
+            sim_results.append([port_return, port_vol, sharpe])
+
+        sim_out_df = pd.DataFrame(sim_results, columns=["Portfolio_Return", "Volatility", "Sharpe_Ratio"])
+
+        sharpe_series = sim_out_df["Sharpe_Ratio"].replace([np.inf, -np.inf], np.nan)
+        optimal_idx = sharpe_series.idxmax()
+
+        optimal_portfolio_return = float(sim_out_df.loc[optimal_idx, "Portfolio_Return"])
+        optimal_volatility = float(sim_out_df.loc[optimal_idx, "Volatility"])
+
+        fig = px.scatter(
+            sim_out_df,
+            x='Volatility',
+            y='Portfolio_Return',
+            color='Sharpe_Ratio',
+            size='Sharpe_Ratio',
+            hover_data=['Sharpe_Ratio']
+        )
+        fig.add_trace(go.Scatter(
+            x=[optimal_volatility],
+            y=[optimal_portfolio_return],
+            mode='markers',
+            name='Optimal Point',
+            marker=dict(size=[40], color='red')
+        ))
+        fig.update_layout(coloraxis_colorbar=dict(y=0.7, dtick=5))
+        fig.update_layout({'plot_bgcolor': "white"})
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("✅ Optimal Portfolio Weights (Max Sharpe)")
+        best_df = pd.DataFrame({
+            "Asset": prices.columns,
+            "Weight": weight_list[int(optimal_idx)]
+        })
+        st.dataframe(best_df)
 
     # ============================
     # 🔮 Premium AI Prediction Panel (Main)
@@ -212,6 +358,7 @@ if st.session_state.run_analysis:
         if not email:
             st.warning("Enter your email in the sidebar to use the Premium AI feature.")
         else:
+            # if multiple selected, let user choose; otherwise auto
             chosen_ticker = tickers[0]
             if len(tickers) > 1:
                 chosen_ticker = st.selectbox("Select asset for prediction", tickers, index=0)
@@ -221,122 +368,67 @@ if st.session_state.run_analysis:
             if not is_premium:
                 st.info("🔒 This feature is locked.")
                 st.markdown(f"**Upgrade to Premium** to unlock AI predictions for {chosen_ticker}.")
-                st.markdown("""
-                - Advanced Volatility Analysis  
-                - Confidence Intervals  
-                - AI Recommendations
-                """)
-
-                # ─── Razorpay Subscribe Button ──────────────────────────────
-                if st.button("Subscribe for ₹999/mo via Razorpay", type="primary"):
-                    if RAZORPAY_CLIENT is None:
-                        st.error("Razorpay not configured.")
-                    else:
-                        try:
-                            order_data = {
-                                "amount": SUBSCRIPTION_AMOUNT,
-                                "currency": SUBSCRIPTION_CURRENCY,
-                                "receipt": f"rcpt_{user_id_from_email(email)}_{int(time.time())}",
-                                "notes": {"email": email, "purpose": "premium_unlock"}
-                            }
-                            order = RAZORPAY_CLIENT.order.create(data=order_data)
-                            order_id = order["id"]
-
-                            checkout_options = {
-                                "key": RAZORPAY_KEY_ID,
-                                "amount": SUBSCRIPTION_AMOUNT,
-                                "currency": SUBSCRIPTION_CURRENCY,
-                                "name": SUBSCRIPTION_NAME,
-                                "description": SUBSCRIPTION_DESC,
-                                "order_id": order_id,
-                                "prefill": {
-                                    "name": email.split("@")[0].title() if "@" in email else "User",
-                                    "email": email,
-                                },
-                                "theme": {"color": "#3399cc"}
-                            }
-
-                            # JavaScript to open checkout
-                            checkout_script = f"""
-                            <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-                            <script>
-                                var options = {json.dumps(checkout_options)};
-                                options.handler = function (response) {{
-                                    alert("Payment successful!\\nPayment ID: " + response.razorpay_payment_id);
-                                    window.parent.postMessage({{
-                                        type: "razorpay_success",
-                                        order_id: "{order_id}",
-                                        payment_id: response.razorpay_payment_id,
-                                        signature: response.razorpay_signature
-                                    }}, "*");
-                                }};
-                                var rzp = new Razorpay(options);
-                                rzp.open();
-                            </script>
-                            """
-
-                            st.components.v1.html(checkout_script, height=1)
-
-                            st.info("""
-                            Payment window opened.  
-                            Complete payment → then return here and use the verification section below.
-                            """)
-
-                            # Store order_id for verification
-                            st.session_state["current_order_id"] = order_id
-                            st.session_state["current_email"] = email
-
-                        except Exception as e:
-                            st.error(f"Could not create Razorpay order: {str(e)}")
-
-                # ─── Manual Verification (reliable on Streamlit Cloud) ──────
-                if "current_order_id" in st.session_state:
-                    st.markdown("### Verify Payment (after completing payment)")
-                    payment_id = st.text_input("Razorpay Payment ID", "")
-                    signature  = st.text_input("Razorpay Signature", "")
-
-                    if st.button("Verify Payment"):
-                        try:
-                            params = {
-                                "razorpay_order_id": st.session_state["current_order_id"],
-                                "razorpay_payment_id": payment_id,
-                                "razorpay_signature": signature
-                            }
-                            RAZORPAY_CLIENT.utility.verify_payment_signature(params)
-                            # Success!
-                            st.session_state.premium_users.add(st.session_state["current_email"])
-                            st.success(f"Payment verified! Premium unlocked for {st.session_state['current_email']} 🎉")
-                            # Clean up
-                            for key in ["current_order_id", "current_email"]:
-                                if key in st.session_state:
-                                    del st.session_state[key]
-                            st.rerun()
-                        except razorpay.errors.SignatureVerificationError:
-                            st.error("Invalid signature — payment verification failed.")
-                        except Exception as e:
-                            st.error(f"Verification error: {str(e)}")
-
+                st.markdown("- Advanced Volatility Analysis")
+                st.markdown("- Confidence Intervals")
+                st.markdown("- AI Recommendations")
+                
+                # STRIPE INTEGRATION
+                # Replace 'https://buy.stripe.com/test_...' with your actual Stripe Payment Link
+                stripe_payment_link = "https://buy.stripe.com/test_123456789" 
+                
+                st.markdown(f"""
+                    <a href="{stripe_payment_link}" target="_blank">
+                        <button style="
+                            background-color: #635bff; 
+                            color: white; 
+                            padding: 10px 20px; 
+                            border: none; 
+                            border-radius: 5px; 
+                            cursor: pointer;
+                            font-weight: bold;">
+                            Subscribe for $9.99/mo via Stripe
+                        </button>
+                    </a>
+                    <p style="font-size: 0.8em; color: gray; margin-top: 5px;">
+                        (After payment, you will be redirected back here to unlock features)
+                    </p>
+                """, unsafe_allow_html=True)
+                
+                # Keep the mock button for testing if needed, or remove it. 
+                # For now, let's comment it out or leave it as a "Dev Bypass"
+                with st.expander("Developer Override (Mock Payment)"):
+                    if st.button(f"Simulate Successful Payment"):
+                         st.session_state.premium_users.add(email)
+                         st.rerun()
             else:
                 st.success(f"✅ Premium Active for {email}")
-
+                
                 if st.button("Run AI Prediction"):
                     with st.spinner(f"AI Agent is analyzing {chosen_ticker}..."):
                         try:
+                            # Use local AI logic
                             ai_df, analysis = advanced_ai_prediction(chosen_ticker, days=horizon_days)
+                            
+                            # Calculate returns for display
+                            # Fetch current price for reference
                             current_data = yf.Ticker(chosen_ticker).history(period="1d")
                             
                             if not current_data.empty:
                                 current_price = current_data['Close'].iloc[-1]
-                                last_pred  = ai_df['Predicted_Price'].iloc[-1]
+                                
+                                last_pred = ai_df['Predicted_Price'].iloc[-1]
                                 last_lower = ai_df['Lower_Bound'].iloc[-1]
                                 last_upper = ai_df['Upper_Bound'].iloc[-1]
                                 
-                                ret      = (last_pred - current_price) / current_price
-                                ret_low  = (last_lower - current_price) / current_price
+                                ret = (last_pred - current_price) / current_price
+                                ret_low = (last_lower - current_price) / current_price
                                 ret_high = (last_upper - current_price) / current_price
                                 
                                 st.metric("Predicted Return", f"{ret*100:.2f}%")
-                                st.write(f"Confidence Range: {ret_low*100:.2f}% to {ret_high*100:.2f}% (Horizon: {horizon_days} trading days)")
+                                st.write(
+                                    f"Confidence Range: {ret_low*100:.2f}% to {ret_high*100:.2f}% "
+                                    f"(Horizon: {horizon_days} trading days)"
+                                )
                                 
                                 st.markdown("### AI Analysis")
                                 c1, c2, c3 = st.columns(3)
@@ -346,14 +438,23 @@ if st.session_state.run_analysis:
                                 
                                 st.info(f"Recommendation: **{analysis['Recommendation']}**")
                                 
+                                # Plot
                                 fig_ai = go.Figure()
                                 fig_ai.add_trace(go.Scatter(x=ai_df.index, y=ai_df['Predicted_Price'], name='AI Prediction', line=dict(color='purple')))
-                                fig_ai.add_trace(go.Scatter(x=ai_df.index, y=ai_df['Upper_Bound'], fill=None, mode='lines', line_color='rgba(0,0,0,0)', showlegend=False))
-                                fig_ai.add_trace(go.Scatter(x=ai_df.index, y=ai_df['Lower_Bound'], fill='tonexty', mode='lines', line_color='rgba(0,0,0,0)', name='Confidence Interval', fillcolor='rgba(128, 0, 128, 0.2)'))
+                                fig_ai.add_trace(go.Scatter(
+                                    x=ai_df.index, y=ai_df['Upper_Bound'],
+                                    fill=None, mode='lines', line_color='rgba(0,0,0,0)', showlegend=False
+                                ))
+                                fig_ai.add_trace(go.Scatter(
+                                    x=ai_df.index, y=ai_df['Lower_Bound'],
+                                    fill='tonexty', mode='lines', line_color='rgba(0,0,0,0)',
+                                    name='Confidence Interval', fillcolor='rgba(128, 0, 128, 0.2)'
+                                ))
                                 st.plotly_chart(fig_ai, use_container_width=True)
                                 
                             else:
-                                st.error("Could not fetch current price.")
+                                st.error("Could not fetch current price for return calculation.")
+
                         except Exception as e:
                             st.error(f"Prediction error: {e}")
 
