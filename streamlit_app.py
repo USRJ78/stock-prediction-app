@@ -14,6 +14,9 @@ from utils import advanced_ai_prediction
 from datetime import date
 import requests
 import hashlib
+import razorpay             # ← added
+import json                 # ← added
+import time                 # ← added for receipt id
 
 st.set_page_config(page_title="Universal Market App", layout="wide")
 
@@ -21,14 +24,20 @@ st.set_page_config(page_title="Universal Market App", layout="wide")
 if "premium_users" not in st.session_state:
     st.session_state.premium_users = set()
 
-# Check for payment success from Stripe redirect
-# When Stripe redirects back to http://your-app-url/?success=true
-query_params = st.query_params
-if "success" in query_params and query_params["success"] == "true":
-    # If the user's email is in session state, add it to premium
-    if "premium_email" in st.session_state:
-        st.session_state.premium_users.add(st.session_state.premium_email)
-        st.success("Payment Successful! Premium features unlocked.")
+# Razorpay setup – uses secrets
+try:
+    RAZORPAY_KEY_ID = st.secrets["RAZORPAY_KEY_ID"]
+    RAZORPAY_KEY_SECRET = st.secrets["RAZORPAY_KEY_SECRET"]
+    client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+except Exception as e:
+    st.error("Razorpay keys not set in Streamlit secrets. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.")
+    client = None
+
+# Subscription details (change amount/currency as needed)
+SUBSCRIPTION_AMOUNT = 99900     # paise → ₹999
+SUBSCRIPTION_CURRENCY = "INR"
+SUBSCRIPTION_NAME = "Universal Market App Premium"
+SUBSCRIPTION_DESC = "AI Predictions + Advanced Features"
 
 st.title("📊 Universal Stock & ETF Portfolio App")
 st.markdown("Search by **name or ticker**, allocate capital, and run portfolio simulations.")
@@ -372,34 +381,89 @@ if st.session_state.run_analysis:
                 st.markdown("- Confidence Intervals")
                 st.markdown("- AI Recommendations")
                 
-                # STRIPE INTEGRATION
-                # Replace 'https://buy.stripe.com/test_...' with your actual Stripe Payment Link
-                stripe_payment_link = "https://buy.stripe.com/test_123456789" 
-                
-                st.markdown(f"""
-                    <a href="{stripe_payment_link}" target="_blank">
-                        <button style="
-                            background-color: #635bff; 
-                            color: white; 
-                            padding: 10px 20px; 
-                            border: none; 
-                            border-radius: 5px; 
-                            cursor: pointer;
-                            font-weight: bold;">
-                            Subscribe for $9.99/mo via Stripe
-                        </button>
-                    </a>
-                    <p style="font-size: 0.8em; color: gray; margin-top: 5px;">
-                        (After payment, you will be redirected back here to unlock features)
-                    </p>
-                """, unsafe_allow_html=True)
-                
-                # Keep the mock button for testing if needed, or remove it. 
-                # For now, let's comment it out or leave it as a "Dev Bypass"
+                # ─── Razorpay Payment Button ────────────────────────────────────
+                if st.button("Subscribe for ₹999/mo via Razorpay", type="primary"):
+                    if client is None:
+                        st.error("Razorpay not configured – check secrets.")
+                    else:
+                        try:
+                            order_data = {
+                                "amount": SUBSCRIPTION_AMOUNT,
+                                "currency": SUBSCRIPTION_CURRENCY,
+                                "receipt": f"rcpt_{user_id_from_email(email)}_{int(time.time())}",
+                                "notes": {"email": email}
+                            }
+                            order = client.order.create(data=order_data)
+                            order_id = order['id']
+
+                            options = {
+                                "key": RAZORPAY_KEY_ID,
+                                "amount": SUBSCRIPTION_AMOUNT,
+                                "currency": SUBSCRIPTION_CURRENCY,
+                                "name": SUBSCRIPTION_NAME,
+                                "description": SUBSCRIPTION_DESC,
+                                "order_id": order_id,
+                                "prefill": {
+                                    "email": email,
+                                    "name": email.split("@")[0].title() if "@" in email else "User"
+                                },
+                                "theme": {"color": "#3399cc"}
+                            }
+
+                            js_code = f"""
+                            <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+                            <script>
+                                var options = {json.dumps(options)};
+                                options.handler = function (response){{
+                                    alert("Payment Successful!\\nPayment ID: " + response.razorpay_payment_id + "\\nSignature: " + response.razorpay_signature);
+                                    // You can copy these values
+                                }};
+                                var rzp = new Razorpay(options);
+                                rzp.open();
+                            </script>
+                            """
+
+                            st.components.v1.html(js_code, height=1)
+
+                            st.info("Payment popup should appear. Complete payment, then copy Payment ID & Signature from the alert or Razorpay dashboard → use the form below to verify.")
+
+                            # Store for verification
+                            if "pending_order" not in st.session_state:
+                                st.session_state.pending_order = {}
+                            st.session_state.pending_order[email] = order_id
+
+                        except Exception as e:
+                            st.error(f"Failed to create order: {e}")
+
+                # Verification section
+                if email in st.session_state.get("pending_order", {}):
+                    st.markdown("### Verify Your Payment")
+                    payment_id = st.text_input("Razorpay Payment ID", key=f"pid_{email}")
+                    signature = st.text_input("Razorpay Signature", key=f"sig_{email}")
+
+                    if st.button("Verify & Unlock Premium"):
+                        try:
+                            params = {
+                                "razorpay_order_id": st.session_state.pending_order[email],
+                                "razorpay_payment_id": payment_id,
+                                "razorpay_signature": signature
+                            }
+                            client.utility.verify_payment_signature(params)
+                            st.session_state.premium_users.add(email)
+                            del st.session_state.pending_order[email]
+                            st.success("Payment verified! Premium features unlocked 🎉")
+                            st.rerun()
+                        except razorpay.errors.SignatureVerificationError:
+                            st.error("Signature verification failed – check the values.")
+                        except Exception as e:
+                            st.error(f"Error during verification: {e}")
+
+                # Optional dev mock (keep or remove)
                 with st.expander("Developer Override (Mock Payment)"):
-                    if st.button(f"Simulate Successful Payment"):
-                         st.session_state.premium_users.add(email)
-                         st.rerun()
+                    if st.button(f"Simulate Successful Payment (for {email})"):
+                        st.session_state.premium_users.add(email)
+                        st.rerun()
+
             else:
                 st.success(f"✅ Premium Active for {email}")
                 
