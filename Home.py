@@ -366,7 +366,7 @@ if st.session_state.run_analysis:
         st.dataframe(best_df)
 
     # ============================
-    # 🔮 Premium AI Prediction Panel (Main) — ONLY THIS SECTION WAS CHANGED
+    # 🔮 Premium AI Prediction Panel (Main) – ONLY THIS PART CHANGED
     # ============================
     if ai_enabled:
         st.markdown("---")
@@ -450,6 +450,7 @@ if st.session_state.run_analysis:
                             }
                             client.utility.verify_payment_signature(params)
                             st.session_state.premium_users.add(email)
+                            st.session_state["premium_email"] = email  # Save for cross-page use
                             del st.session_state.pending_order[email]
                             st.success("Payment verified! Premium features unlocked 🎉")
                             st.rerun()
@@ -462,12 +463,12 @@ if st.session_state.run_analysis:
                 with st.expander("Developer Override (Mock Payment)"):
                     if st.button(f"Simulate Successful Payment (for {email})"):
                         st.session_state.premium_users.add(email)
+                        st.session_state["premium_email"] = email  # Save for cross-page use
                         st.rerun()
 
             else:
                 st.success(f"✅ Premium Active for {email}")
                 
-                # ─── This is the only change ───
                 if st.button("Open AI Premium Prediction →", type="primary"):
                     st.switch_page("pages/AI_Prediction.py")
 
