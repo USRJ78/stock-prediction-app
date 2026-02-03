@@ -366,7 +366,7 @@ if st.session_state.run_analysis:
         st.dataframe(best_df)
 
     # ============================
-    # 🔮 Premium AI Prediction Panel (Main) - ONLY THIS SECTION CHANGED
+    # 🔮 Premium AI Prediction Panel (Main) — ONLY THIS SECTION WAS CHANGED
     # ============================
     if ai_enabled:
         st.markdown("---")
@@ -458,7 +458,7 @@ if st.session_state.run_analysis:
                         except Exception as e:
                             st.error(f"Error during verification: {e}")
 
-                # Optional dev mock
+                # Optional dev mock (keep or remove)
                 with st.expander("Developer Override (Mock Payment)"):
                     if st.button(f"Simulate Successful Payment (for {email})"):
                         st.session_state.premium_users.add(email)
@@ -467,6 +467,7 @@ if st.session_state.run_analysis:
             else:
                 st.success(f"✅ Premium Active for {email}")
                 
+                # ─── This is the only change ───
                 if st.button("Open AI Premium Prediction →", type="primary"):
                     st.switch_page("pages/AI_Prediction.py")
 
