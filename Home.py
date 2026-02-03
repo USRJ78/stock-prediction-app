@@ -193,7 +193,7 @@ horizon_map = {"1W": 5, "1M": 21, "3M": 63, "1Y": 252}
 horizon_label = st.sidebar.selectbox("Horizon", list(horizon_map.keys()), index=1, key="ai_horizon", on_change=trigger_run)
 horizon_days = horizon_map[horizon_label]
 
-# ─── Legal & Policies Links (added here for Razorpay compliance) ──────
+# ─── Legal & Policies Links ──────
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Legal & Policies**")
 st.sidebar.markdown("- [Privacy Policy](https://drive.google.com/file/d/1JLl2BzpkHDpz6-cfMR6b-wiXpcN6dKet/view?usp=sharing)")
@@ -204,6 +204,7 @@ st.sidebar.markdown("**Contact:** udaysinghrathore09@gmail.com")
 # ------------------ Main ------------------
 
 if st.session_state.run_analysis:
+
     if end_date <= start_date:
         st.error("❌ End Date must be after Start Date")
         st.stop()
@@ -365,7 +366,7 @@ if st.session_state.run_analysis:
         st.dataframe(best_df)
 
     # ============================
-    # 🔮 Premium AI Prediction Panel (Main)
+    # 🔮 Premium AI Prediction Panel (Main) - ONLY THIS SECTION CHANGED
     # ============================
     if ai_enabled:
         st.markdown("---")
@@ -387,7 +388,7 @@ if st.session_state.run_analysis:
                 st.markdown("- Advanced Volatility Analysis")
                 st.markdown("- Confidence Intervals")
                 st.markdown("- AI Recommendations")
-               
+                
                 # ─── Razorpay Payment Button ────────────────────────────────────
                 if st.button("Subscribe for ₹999/mo via Razorpay", type="primary"):
                     if client is None:
@@ -421,7 +422,6 @@ if st.session_state.run_analysis:
                                 var options = {json.dumps(options)};
                                 options.handler = function (response){{
                                     alert("Payment Successful!\\nPayment ID: " + response.razorpay_payment_id + "\\nSignature: " + response.razorpay_signature);
-                                    // You can copy these values
                                 }};
                                 var rzp = new Razorpay(options);
                                 rzp.open();
@@ -435,6 +435,7 @@ if st.session_state.run_analysis:
                             st.session_state.pending_order[email] = order_id
                         except Exception as e:
                             st.error(f"Failed to create order: {e}")
+
                 # Verification section
                 if email in st.session_state.get("pending_order", {}):
                     st.markdown("### Verify Your Payment")
@@ -456,66 +457,18 @@ if st.session_state.run_analysis:
                             st.error("Signature verification failed – check the values.")
                         except Exception as e:
                             st.error(f"Error during verification: {e}")
-                # Optional dev mock (keep or remove)
+
+                # Optional dev mock
                 with st.expander("Developer Override (Mock Payment)"):
                     if st.button(f"Simulate Successful Payment (for {email})"):
                         st.session_state.premium_users.add(email)
                         st.rerun()
+
             else:
                 st.success(f"✅ Premium Active for {email}")
-               
-                if st.button("Run AI Prediction"):
-                    with st.spinner(f"AI Agent is analyzing {chosen_ticker}..."):
-                        try:
-                            # Use local AI logic
-                            ai_df, analysis = advanced_ai_prediction(chosen_ticker, days=horizon_days)
-                           
-                            # Calculate returns for display
-                            # Fetch current price for reference
-                            current_data = yf.Ticker(chosen_ticker).history(period="1d")
-                           
-                            if not current_data.empty:
-                                current_price = current_data['Close'].iloc[-1]
-                               
-                                last_pred = ai_df['Predicted_Price'].iloc[-1]
-                                last_lower = ai_df['Lower_Bound'].iloc[-1]
-                                last_upper = ai_df['Upper_Bound'].iloc[-1]
-                               
-                                ret = (last_pred - current_price) / current_price
-                                ret_low = (last_lower - current_price) / current_price
-                                ret_high = (last_upper - current_price) / current_price
-                               
-                                st.metric("Predicted Return", f"{ret*100:.2f}%")
-                                st.write(
-                                    f"Confidence Range: {ret_low*100:.2f}% to {ret_high*100:.2f}% "
-                                    f"(Horizon: {horizon_days} trading days)"
-                                )
-                               
-                                st.markdown("### AI Analysis")
-                                c1, c2, c3 = st.columns(3)
-                                c1.metric("Trend", analysis["Trend"])
-                                c2.metric("Volatility", analysis["Volatility"])
-                                c3.metric("Confidence", analysis["Confidence_Score"])
-                               
-                                st.info(f"Recommendation: **{analysis['Recommendation']}**")
-                               
-                                # Plot
-                                fig_ai = go.Figure()
-                                fig_ai.add_trace(go.Scatter(x=ai_df.index, y=ai_df['Predicted_Price'], name='AI Prediction', line=dict(color='purple')))
-                                fig_ai.add_trace(go.Scatter(
-                                    x=ai_df.index, y=ai_df['Upper_Bound'],
-                                    fill=None, mode='lines', line_color='rgba(0,0,0,0)', showlegend=False
-                                ))
-                                fig_ai.add_trace(go.Scatter(
-                                    x=ai_df.index, y=ai_df['Lower_Bound'],
-                                    fill='tonexty', mode='lines', line_color='rgba(0,0,0,0)',
-                                    name='Confidence Interval', fillcolor='rgba(128, 0, 128, 0.2)'
-                                ))
-                                st.plotly_chart(fig_ai, use_container_width=True)
-                               
-                            else:
-                                st.error("Could not fetch current price for return calculation.")
-                        except Exception as e:
-                            st.error(f"Prediction error: {e}")
+                
+                if st.button("Open AI Premium Prediction →", type="primary"):
+                    st.switch_page("pages/AI_Prediction.py")
+
 else:
     st.info("👈 Select assets / change dates — graphs will auto-update. (You can also click Run Analysis.)")
