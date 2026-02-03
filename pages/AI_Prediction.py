@@ -4,12 +4,15 @@ from utils import advanced_ai_prediction
 
 st.title("🔮 AI Premium Prediction")
 
-# Basic premium check using session state
+# Improved premium check with fallback input
 email = st.session_state.get("premium_email", None)
+if not email:
+    email = st.text_input("Confirm your email to access premium features", key="confirm_email_ai")
+
 if not email or email not in st.session_state.premium_users:
-    st.error("Premium access required for this page.")
-    if st.button("← Back to Portfolio"):
-        st.switch_page("Home.py")  # change if your main file has a different name
+    st.error("You need premium access to use this page. Please go back to the main page and subscribe/verify.")
+    if st.button("← Back to Main Portfolio"):
+        st.switch_page("Home.py")  # Change to your actual main file name if different
     st.stop()
 
 st.success(f"Premium active for {email}")
@@ -72,4 +75,4 @@ if st.button("Run AI Prediction"):
 
 st.markdown("---")
 if st.button("← Back to Portfolio"):
-    st.switch_page("Home.py")  # change if needed
+    st.switch_page("Home.py")  # Change if your main file has a different name
