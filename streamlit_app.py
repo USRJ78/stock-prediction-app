@@ -193,10 +193,17 @@ horizon_map = {"1W": 5, "1M": 21, "3M": 63, "1Y": 252}
 horizon_label = st.sidebar.selectbox("Horizon", list(horizon_map.keys()), index=1, key="ai_horizon", on_change=trigger_run)
 horizon_days = horizon_map[horizon_label]
 
+# ─── Legal & Policies Links (added here for Razorpay compliance) ──────
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Legal & Policies**")
+st.sidebar.markdown("- [Privacy Policy](https://drive.google.com/file/d/1JLl2BzpkHDpz6-cfMR6b-wiXpcN6dKet/view?usp=sharing)")
+st.sidebar.markdown("- [Terms of Service](https://drive.google.com/file/d/1VABpc6ZANgS1L3DEiSlLuPX7oqS8mh44/view?usp=sharing)")
+st.sidebar.markdown("- [Refund & Cancellation Policy](https://drive.google.com/file/d/1i0g2g9YdNASv1UyweBiiNEtXyxM_7H3A/view?usp=sharing)")
+st.sidebar.markdown("**Contact:** udaysinghrathore09@gmail.com")
+
 # ------------------ Main ------------------
 
 if st.session_state.run_analysis:
-
     if end_date <= start_date:
         st.error("❌ End Date must be after Start Date")
         st.stop()
@@ -380,7 +387,7 @@ if st.session_state.run_analysis:
                 st.markdown("- Advanced Volatility Analysis")
                 st.markdown("- Confidence Intervals")
                 st.markdown("- AI Recommendations")
-                
+               
                 # ─── Razorpay Payment Button ────────────────────────────────────
                 if st.button("Subscribe for ₹999/mo via Razorpay", type="primary"):
                     if client is None:
@@ -395,7 +402,6 @@ if st.session_state.run_analysis:
                             }
                             order = client.order.create(data=order_data)
                             order_id = order['id']
-
                             options = {
                                 "key": RAZORPAY_KEY_ID,
                                 "amount": SUBSCRIPTION_AMOUNT,
@@ -409,7 +415,6 @@ if st.session_state.run_analysis:
                                 },
                                 "theme": {"color": "#3399cc"}
                             }
-
                             js_code = f"""
                             <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
                             <script>
@@ -422,25 +427,19 @@ if st.session_state.run_analysis:
                                 rzp.open();
                             </script>
                             """
-
                             st.components.v1.html(js_code, height=1)
-
                             st.info("Payment popup should appear. Complete payment, then copy Payment ID & Signature from the alert or Razorpay dashboard → use the form below to verify.")
-
                             # Store for verification
                             if "pending_order" not in st.session_state:
                                 st.session_state.pending_order = {}
                             st.session_state.pending_order[email] = order_id
-
                         except Exception as e:
                             st.error(f"Failed to create order: {e}")
-
                 # Verification section
                 if email in st.session_state.get("pending_order", {}):
                     st.markdown("### Verify Your Payment")
                     payment_id = st.text_input("Razorpay Payment ID", key=f"pid_{email}")
                     signature = st.text_input("Razorpay Signature", key=f"sig_{email}")
-
                     if st.button("Verify & Unlock Premium"):
                         try:
                             params = {
@@ -457,51 +456,49 @@ if st.session_state.run_analysis:
                             st.error("Signature verification failed – check the values.")
                         except Exception as e:
                             st.error(f"Error during verification: {e}")
-
                 # Optional dev mock (keep or remove)
                 with st.expander("Developer Override (Mock Payment)"):
                     if st.button(f"Simulate Successful Payment (for {email})"):
                         st.session_state.premium_users.add(email)
                         st.rerun()
-
             else:
                 st.success(f"✅ Premium Active for {email}")
-                
+               
                 if st.button("Run AI Prediction"):
                     with st.spinner(f"AI Agent is analyzing {chosen_ticker}..."):
                         try:
                             # Use local AI logic
                             ai_df, analysis = advanced_ai_prediction(chosen_ticker, days=horizon_days)
-                            
+                           
                             # Calculate returns for display
                             # Fetch current price for reference
                             current_data = yf.Ticker(chosen_ticker).history(period="1d")
-                            
+                           
                             if not current_data.empty:
                                 current_price = current_data['Close'].iloc[-1]
-                                
+                               
                                 last_pred = ai_df['Predicted_Price'].iloc[-1]
                                 last_lower = ai_df['Lower_Bound'].iloc[-1]
                                 last_upper = ai_df['Upper_Bound'].iloc[-1]
-                                
+                               
                                 ret = (last_pred - current_price) / current_price
                                 ret_low = (last_lower - current_price) / current_price
                                 ret_high = (last_upper - current_price) / current_price
-                                
+                               
                                 st.metric("Predicted Return", f"{ret*100:.2f}%")
                                 st.write(
                                     f"Confidence Range: {ret_low*100:.2f}% to {ret_high*100:.2f}% "
                                     f"(Horizon: {horizon_days} trading days)"
                                 )
-                                
+                               
                                 st.markdown("### AI Analysis")
                                 c1, c2, c3 = st.columns(3)
                                 c1.metric("Trend", analysis["Trend"])
                                 c2.metric("Volatility", analysis["Volatility"])
                                 c3.metric("Confidence", analysis["Confidence_Score"])
-                                
+                               
                                 st.info(f"Recommendation: **{analysis['Recommendation']}**")
-                                
+                               
                                 # Plot
                                 fig_ai = go.Figure()
                                 fig_ai.add_trace(go.Scatter(x=ai_df.index, y=ai_df['Predicted_Price'], name='AI Prediction', line=dict(color='purple')))
@@ -515,12 +512,10 @@ if st.session_state.run_analysis:
                                     name='Confidence Interval', fillcolor='rgba(128, 0, 128, 0.2)'
                                 ))
                                 st.plotly_chart(fig_ai, use_container_width=True)
-                                
+                               
                             else:
                                 st.error("Could not fetch current price for return calculation.")
-
                         except Exception as e:
                             st.error(f"Prediction error: {e}")
-
 else:
     st.info("👈 Select assets / change dates — graphs will auto-update. (You can also click Run Analysis.)")
