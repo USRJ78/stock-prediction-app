@@ -1,74 +1,111 @@
 import streamlit as st
 import pandas as pd
+import yfinance as yf
+import time
 
-st.title("Portfolio Construction Dashboard (Value + Growth Screening)")
-
+st.title("Portfolio Construction Dashboard")
 st.markdown("""
-This page shows a screened list of potential stocks using **Peter Lynch GARP** (low PEG < 1) as the first filter.  
-Then we apply **Benjamin Graham** intrinsic value (revised formula) with **30% margin of safety** to check if they are undervalued.
-
-Data is approximate (early 2026 market conditions) — always verify live on Screener.in / Yahoo Finance / Tickertape.  
-Bond yield used: ~7.6% (AAA corporate India).
+**Live Value + Growth Screening**  
+1. Click "Start Live Screening" to fetch current data  
+2. First filter: Peter Lynch style (low PEG < 1 preferred)  
+3. Then apply Benjamin Graham intrinsic value + 30% margin of safety  
+Data from yfinance (live prices) + recent low-PEG candidates. Always cross-check on Screener.in.
 """)
 
-# Pre-screened stocks from recent low-PEG GARP screens (examples from Screener.in / Tickertape / Equitymaster)
-# Format: {'Ticker': 'Company Name', 'Current_Price': float, 'EPS': float, 'Growth_pct': float, 'PEG': float}
-screened_stocks = [
-    {'Ticker': 'PREMIER', 'Company': 'Premier Energies', 'Current_Price': 1050, 'EPS': 45, 'Growth_pct': 30, 'PEG': 0.15},
-    {'Ticker': 'WELSPUNCORP', 'Company': 'Welspun Corp', 'Current_Price': 650, 'EPS': 35, 'Growth_pct': 18, 'PEG': 0.37},
-    {'Ticker': 'ZENTECH', 'Company': 'Zen Technologies', 'Current_Price': 1900, 'EPS': 18, 'Growth_pct': 35, 'PEG': 0.13},
-    {'Ticker': 'NATCOPHARM', 'Company': 'Natco Pharma', 'Current_Price': 1300, 'EPS': 55, 'Growth_pct': 18, 'PEG': 0.07},
-    {'Ticker': 'INSOL', 'Company': 'Insolation Energy', 'Current_Price': 280, 'EPS': 12, 'Growth_pct': 40, 'PEG': 0.22},
-    {'Ticker': 'GANESHHOUC', 'Company': 'Ganesh Housing Corp', 'Current_Price': 750, 'EPS': 30, 'Growth_pct': 20, 'PEG': 0.4},
-    {'Ticker': 'SHILCTRN', 'Company': 'Shilchar Technologies', 'Current_Price': 4500, 'EPS': 120, 'Growth_pct': 25, 'PEG': 0.7},
-    # Add more if you want — or expand later with API
+# Candidate stocks from recent low-PEG screens (Feb 2026 context - high growth + reasonable valuation)
+# You can expand this list over time
+candidates = [
+    "PREMIER.NS", "WELSPUNCORP.NS", "ZENT.NS", "NATCOPHARM.NS", "INSOL.NS",
+    "GANESHHOUC.NS", "SHILCTRN.NS", "TBO.NS", "KPITTECH.NS", "SHAKTIPUMP.NS",
+    "SCHNEIDER.NS", "BILLIONBRAINS.NS", "CEATLTD.NS", "JUPITER.NS", "DOMS.NS",
+    # Add more tickers as you discover low-PEG ones
 ]
 
-df = pd.DataFrame(screened_stocks)
+if st.button("Start Live Screening", type="primary"):
+    with st.spinner("Fetching live data and running screening... (may take 10-30 seconds)"):
+        results = []
+        bond_yield = 7.6  # AAA corporate India ~7.6% (early 2026)
 
-# Calculate valuations
-df['Lynch_Fair_PE'] = df['Growth_pct'] + 1.0  # approx dividend yield 1% average
-df['Lynch_Fair_Value'] = df['EPS'] * df['Lynch_Fair_PE']
+        for ticker in candidates:
+            try:
+                stock = yf.Ticker(ticker)
+                info = stock.info
+                current_price = info.get('currentPrice', info.get('regularMarketPrice', None))
+                if current_price is None:
+                    continue
 
-df['Graham_Base'] = 8.5 + 2 * df['Growth_pct']
-df['Graham_Intrinsic'] = (df['EPS'] * df['Graham_Base'] * 4.4) / 7.6
-df['Graham_MoS_30'] = df['Graham_Intrinsic'] * 0.70
+                eps = info.get('trailingEps', info.get('forwardEps', None))
+                if eps is None or eps <= 0:
+                    continue
 
-# Verdict columns
-df['Lynch_Verdict'] = df.apply(lambda row: 
-    'Undervalued' if row['Current_Price'] < row['Lynch_Fair_Value'] else 
-    'Fairly Valued' if abs(row['Current_Price'] - row['Lynch_Fair_Value']) / row['Lynch_Fair_Value'] < 0.15 else 'Overvalued', axis=1)
+                growth_pct = info.get('earningsGrowth', 0) * 100
+                if growth_pct <= 0:
+                    growth_pct = 10  # fallback reasonable growth
 
-df['Graham_Verdict'] = df.apply(lambda row: 
-    'Undervalued (with safety)' if row['Current_Price'] < row['Graham_MoS_30'] else 
-    'Fairly Valued' if row['Current_Price'] < row['Graham_Intrinsic'] else 'Overvalued', axis=1)
+                div_yield_pct = (info.get('dividendYield', 0) or 0) * 100
 
-# Display dashboard table
-st.subheader("Screened Stocks Dashboard")
-st.dataframe(
-    df[['Company', 'Ticker', 'Current_Price', 'PEG', 'Lynch_Fair_Value', 'Lynch_Verdict', 
-        'Graham_Intrinsic', 'Graham_MoS_30', 'Graham_Verdict']],
-    use_container_width=True,
-    column_config={
-        'Current_Price': st.column_config.NumberColumn("Current Price (₹)"),
-        'PEG': st.column_config.NumberColumn("PEG Ratio", format="%.2f"),
-        'Lynch_Fair_Value': st.column_config.NumberColumn("Lynch Fair Value (₹)", format="%.0f"),
-        'Graham_Intrinsic': st.column_config.NumberColumn("Graham Intrinsic (₹)", format="%.0f"),
-        'Graham_MoS_30': st.column_config.NumberColumn("Graham + 30% MoS (₹)", format="%.0f"),
-    }
-)
+                current_pe = info.get('trailingPE', info.get('forwardPE', None)) or (current_price / eps)
 
-st.info("""
-**Interpretation Guide**:
-- **Peter Lynch Verdict**: Focuses on growth at reasonable price (PEG < 1 = undervalued).
-- **Graham Verdict**: More conservative — prioritizes margin of safety.
-- **Best opportunities**: Stocks undervalued on **both** (e.g. Premier Energies, Welspun Corp in this snapshot).
-- Data is illustrative — refresh with latest numbers from Screener.in or yfinance.
-""")
+                # Peter Lynch
+                lynch_fair_pe = growth_pct + div_yield_pct
+                lynch_fv = eps * lynch_fair_pe
+                peg = current_pe / growth_pct if growth_pct > 0 else 999
 
-# Back button
+                # Benjamin Graham
+                graham_base = 8.5 + 2 * growth_pct
+                graham_v = (eps * graham_base * 4.4) / bond_yield
+                graham_mos = graham_v * 0.70  # 30% margin of safety
+
+                # Verdicts
+                lynch_verdict = "Undervalued" if current_price < lynch_fv else "Fair" if abs(current_price - lynch_fv)/lynch_fv < 0.15 else "Overvalued"
+                graham_verdict = "Undervalued (MoS)" if current_price < graham_mos else "Fair" if current_price < graham_v else "Overvalued"
+
+                results.append({
+                    "Ticker": ticker,
+                    "Company": info.get('shortName', ticker),
+                    "Current Price": round(current_price, 1),
+                    "PEG": round(peg, 2) if peg < 999 else "-",
+                    "Lynch Fair Value": round(lynch_fv, 0),
+                    "Lynch Verdict": lynch_verdict,
+                    "Graham Intrinsic": round(graham_v, 0),
+                    "Graham +30% MoS": round(graham_mos, 0),
+                    "Graham Verdict": graham_verdict
+                })
+
+                time.sleep(0.5)  # polite delay to avoid rate limits
+
+            except Exception as e:
+                continue  # skip failed tickers
+
+        if results:
+            df = pd.DataFrame(results)
+            st.subheader("Live Screening Results")
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Current Price": st.column_config.NumberColumn("Price (₹)"),
+                    "PEG": st.column_config.NumberColumn("PEG", format="%.2f"),
+                    "Lynch Fair Value": st.column_config.NumberColumn("Lynch FV (₹)", format="%.0f"),
+                    "Graham Intrinsic": st.column_config.NumberColumn("Graham IV (₹)", format="%.0f"),
+                    "Graham +30% MoS": st.column_config.NumberColumn("Graham MoS (₹)", format="%.0f"),
+                }
+            )
+
+            st.success(f"Screened {len(results)} stocks with live data.")
+            st.info("Undervalued stocks (especially those undervalued on both) are top candidates. Verify latest data on Screener.in.")
+        else:
+            st.error("No valid data fetched. Check internet or try again later.")
+else:
+    st.info("Click 'Start Live Screening' to fetch current market data and run the Peter Lynch → Benjamin Graham process.")
+
+# Navigation
 st.markdown("---")
-if st.button("← Back to AI Prediction"):
-    st.switch_page("pages/AI_Prediction.py")
-if st.button("← Back to Portfolio Home"):
-    st.switch_page("Home.py")
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("← Back to AI Prediction"):
+        st.switch_page("pages/AI_Prediction.py")
+with col2:
+    if st.button("← Back to Portfolio Home"):
+        st.switch_page("Home.py")
