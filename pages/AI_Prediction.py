@@ -1,119 +1,157 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
-import time
+from utils import advanced_ai_prediction
+from difflib import get_close_matches
 
-st.title("Live Portfolio Value Screening")
+# ─── Reuse the same helper functions as home page ───────────────────────────
+@st.cache_data(ttl=3600)
+def load_nse_stock_list():
+    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+    df = pd.read_csv(url)
+    df["SYMBOL"] = df["SYMBOL"].astype(str) + ".NS"
+    return dict(zip(df["NAME OF COMPANY"].str.upper(), df["SYMBOL"]))
 
-st.markdown("""
-**Live GARP + Value Dashboard**  
-- Click **Start Screening** to fetch current prices, EPS, growth, etc.  
-- First filter: Peter Lynch style (PEG < 1.2 preferred)  
-- Then apply Benjamin Graham + **30% margin of safety**  
-- Results are live — small changes between runs are normal (market moves).  
-- Based on recent low-PEG candidates (expand list anytime).
-""")
+ETF_MAP = {
+    "NIFTY 50 ETF": "NIFTYBEES.NS",
+    "BANK NIFTY ETF": "BANKBEES.NS",
+    "GOLD ETF": "GOLDBEES.NS",
+    "IT ETF": "ITBEES.NS",
+}
 
-# Reduced candidate list for speed (10 stocks — all recent low-PEG examples)
-candidates = [
-    "PREMIER.NS", "WELSPUNCORP.NS", "ZENT.NS", "NATCOPHARM.NS", "INSOL.NS",
-    "GANESHHOUC.NS", "SHILCTRN.NS", "TBO.NS", "KPITTECH.NS", "SHAKTIPUMP.NS"
-]
+@st.cache_data(ttl=3600)
+def load_search_options():
+    stock_map = load_nse_stock_list()
+    return sorted(list(stock_map.keys()) + list(ETF_MAP.keys()))
 
-@st.cache_data(ttl=300)  # cache for 5 min to speed repeated runs
-def get_stock_data(ticker):
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        return {
-            'current_price': info.get('currentPrice') or info.get('regularMarketPrice'),
-            'eps': info.get('trailingEps') or info.get('forwardEps'),
-            'growth_pct': (info.get('earningsGrowth') or 0) * 100,
-            'div_yield_pct': (info.get('dividendYield') or 0) * 100,
-            'pe': info.get('trailingPE') or info.get('forwardPE'),
-            'name': info.get('shortName', ticker)
-        }
-    except:
-        return None
-
-if st.button("Start Live Screening", type="primary", use_container_width=True):
-    with st.spinner("Screening live data..."):
-        results = []
-        bond_yield = 7.6
-
-        progress = st.progress(0)
-        status = st.empty()
-
-        for i, ticker in enumerate(candidates):
-            status.text(f"Checking {ticker} ({i+1}/{len(candidates)})")
-            data = get_stock_data(ticker)
-            if not data or not data['current_price'] or not data['eps'] or data['eps'] <= 0:
-                continue
-
-            growth_pct = data['growth_pct'] if data['growth_pct'] > 0 else 10
-            current_pe = data['pe'] or (data['current_price'] / data['eps'])
-            peg = current_pe / growth_pct if growth_pct > 0 else 999
-
-            # Lynch filter first
-            if peg > 1.2:
-                continue  # skip if not promising
-
-            lynch_fair_pe = growth_pct + data['div_yield_pct']
-            lynch_fv = data['eps'] * lynch_fair_pe
-
-            # Graham
-            graham_base = 8.5 + 2 * growth_pct
-            graham_v = (data['eps'] * graham_base * 4.4) / bond_yield
-            graham_mos = graham_v * 0.70
-
-            lynch_verdict = "Undervalued" if data['current_price'] < lynch_fv else "Fair" if abs(data['current_price'] - lynch_fv)/lynch_fv < 0.15 else "Overvalued"
-            graham_verdict = "Undervalued (MoS)" if data['current_price'] < graham_mos else "Fair" if data['current_price'] < graham_v else "Overvalued"
-
-            results.append({
-                "Ticker": ticker.replace(".NS", ""),
-                "Company": data['name'],
-                "Price": round(data['current_price'], 1),
-                "PEG": round(peg, 2),
-                "Lynch FV": round(lynch_fv, 0),
-                "Lynch Verdict": lynch_verdict,
-                "Graham IV": round(graham_v, 0),
-                "Graham MoS": round(graham_mos, 0),
-                "Graham Verdict": graham_verdict
-            })
-
-            progress.progress((i + 1) / len(candidates))
-            time.sleep(0.3)  # minimal delay
-
-        progress.empty()
-        status.empty()
-
-        if results:
-            df = pd.DataFrame(results)
-            st.subheader(f"Live Results ({len(results)} stocks passed)")
-            st.dataframe(
-                df.sort_values("Graham MoS", ascending=True),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Price": st.column_config.NumberColumn("Price (₹)"),
-                    "PEG": st.column_config.NumberColumn("PEG", format="%.2f"),
-                    "Lynch FV": st.column_config.NumberColumn("Lynch FV (₹)", format="%.0f"),
-                    "Graham IV": st.column_config.NumberColumn("Graham IV (₹)", format="%.0f"),
-                    "Graham MoS": st.column_config.NumberColumn("Buy Below (MoS ₹)", format="%.0f"),
-                }
-            )
-            st.success("Screening done! Results are live — refresh anytime for latest data.")
+@st.cache_data(ttl=3600)
+def resolve_assets(user_inputs):
+    stock_map = load_nse_stock_list()
+    resolved = {}
+    for item in user_inputs:
+        key = item.upper().strip()
+        if "." in key:
+            resolved[item] = key
+        elif key in ETF_MAP:
+            resolved[item] = ETF_MAP[key]
         else:
-            st.warning("No stocks passed filters this time. Market may have shifted — try again later.")
-else:
-    st.info("Press 'Start Live Screening' to run the real-time process.")
+            matches = get_close_matches(key, stock_map.keys(), n=1, cutoff=0.6)
+            resolved[item] = stock_map[matches[0]] if matches else None
+    return resolved
 
-# Navigation
+# ─── Page content ──────────────────────────────────────────────────────────
+
+st.title("🔮 AI Premium Prediction")
+
+# Premium check with fallback
+email = st.session_state.get("premium_email", None)
+if not email:
+    email = st.text_input("Confirm your email to access premium features", key="confirm_email_ai_page")
+
+if not email or email not in st.session_state.premium_users:
+    st.error("Premium access required for this page. Please return to the main page and subscribe/verify.")
+    if st.button("← Back to Portfolio"):
+        st.switch_page("Home.py")  # ← change if your main file name is different
+    st.stop()
+
+st.success(f"Premium active for {email}")
+
+# ─── Stock / ETF selector ──────────────────────────────────────────────────
+st.markdown("### Select Stock(s) / ETF(s)")
+
+search_options = load_search_options()
+
+selected_assets = st.multiselect(
+    "🔍 Search & select stocks / ETFs",
+    options=search_options,
+    key="ai_page_selected_assets"
+)
+
+manual_assets = st.text_input(
+    "✍️ Or manually type names / tickers (comma separated)",
+    "",
+    key="ai_page_manual_assets"
+)
+
+user_assets = list(selected_assets) + [x.strip() for x in manual_assets.split(",") if x.strip()]
+
+# Resolve and display valid tickers
+valid_tickers = []
+if user_assets:
+    resolved = resolve_assets(user_assets)
+    valid_tickers = [v for v in resolved.values() if v]
+    if valid_tickers:
+        st.write("Resolved tickers:", ", ".join(valid_tickers))
+    else:
+        st.warning("No valid tickers could be resolved from your selection.")
+
+# Choose the ticker to predict
+if valid_tickers:
+    chosen_ticker = st.selectbox(
+        "Select asset for prediction",
+        options=valid_tickers,
+        index=0
+    )
+else:
+    chosen_ticker = st.text_input("Enter ticker manually (fallback)", "RELIANCE.NS").upper()
+
+# ─── Horizon selection ─────────────────────────────────────────────────────
+horizon_map = {"1W": 5, "1M": 21, "3M": 63, "1Y": 252}
+horizon_label = st.selectbox("Prediction Horizon", list(horizon_map.keys()), index=1)
+horizon_days = horizon_map[horizon_label]
+
+# ─── Run AI Prediction ─────────────────────────────────────────────────────
+if st.button("Run AI Prediction") and chosen_ticker:
+    with st.spinner(f"AI Agent is analyzing {chosen_ticker}..."):
+        try:
+            ai_df, analysis = advanced_ai_prediction(chosen_ticker, days=horizon_days)
+            
+            current_data = yf.Ticker(chosen_ticker).history(period="1d")
+            
+            if not current_data.empty:
+                current_price = current_data['Close'].iloc[-1]
+                
+                last_pred = ai_df['Predicted_Price'].iloc[-1]
+                last_lower = ai_df['Lower_Bound'].iloc[-1]
+                last_upper = ai_df['Upper_Bound'].iloc[-1]
+                
+                ret = (last_pred - current_price) / current_price
+                ret_low = (last_lower - current_price) / current_price
+                ret_high = (last_upper - current_price) / current_price
+                
+                st.metric("Predicted Return", f"{ret*100:.2f}%")
+                st.write(
+                    f"Confidence Range: {ret_low*100:.2f}% to {ret_high*100:.2f}% "
+                    f"(Horizon: {horizon_days} trading days)"
+                )
+                
+                st.markdown("### AI Analysis")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Trend", analysis["Trend"])
+                c2.metric("Volatility", analysis["Volatility"])
+                c3.metric("Confidence", analysis["Confidence_Score"])
+                
+                st.info(f"Recommendation: **{analysis['Recommendation']}**")
+                
+                # Plot
+                fig_ai = go.Figure()
+                fig_ai.add_trace(go.Scatter(x=ai_df.index, y=ai_df['Predicted_Price'], name='AI Prediction', line=dict(color='purple')))
+                fig_ai.add_trace(go.Scatter(
+                    x=ai_df.index, y=ai_df['Upper_Bound'],
+                    fill=None, mode='lines', line_color='rgba(0,0,0,0)', showlegend=False
+                ))
+                fig_ai.add_trace(go.Scatter(
+                    x=ai_df.index, y=ai_df['Lower_Bound'],
+                    fill='tonexty', mode='lines', line_color='rgba(0,0,0,0)',
+                    name='Confidence Interval', fillcolor='rgba(128, 0, 128, 0.2)'
+                ))
+                st.plotly_chart(fig_ai, use_container_width=True)
+                
+            else:
+                st.error("Could not fetch current price for return calculation.")
+        except Exception as e:
+            st.error(f"Prediction error: {e}")
+
+# ─── Navigation ────────────────────────────────────────────────────────────
 st.markdown("---")
-col1, col2 = st.columns(2)
-with col1:
-    if st.button("← Back to AI Prediction"):
-        st.switch_page("pages/AI_Prediction.py")
-with col2:
-    if st.button("← Back to Home"):
-        st.switch_page("Home.py")
+if st.button("← Back to Portfolio Analysis"):
+    st.switch_page("Home.py")  # ← change if your main file has a different name
