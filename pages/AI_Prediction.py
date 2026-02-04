@@ -1,202 +1,74 @@
 import streamlit as st
-import yfinance as yf
-from utils import advanced_ai_prediction
-from difflib import get_close_matches
+import pandas as pd
 
-# ─── Reuse helpers from home page ──────────────────────────────────────────
-@st.cache_data(ttl=3600)
-def load_nse_stock_list():
-    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-    df = pd.read_csv(url)
-    df["SYMBOL"] = df["SYMBOL"].astype(str) + ".NS"
-    return dict(zip(df["NAME OF COMPANY"].str.upper(), df["SYMBOL"]))
+st.title("Portfolio Construction Dashboard (Value + Growth Screening)")
 
-ETF_MAP = {
-    "NIFTY 50 ETF": "NIFTYBEES.NS",
-    "BANK NIFTY ETF": "BANKBEES.NS",
-    "GOLD ETF": "GOLDBEES.NS",
-    "IT ETF": "ITBEES.NS",
-}
+st.markdown("""
+This page shows a screened list of potential stocks using **Peter Lynch GARP** (low PEG < 1) as the first filter.  
+Then we apply **Benjamin Graham** intrinsic value (revised formula) with **30% margin of safety** to check if they are undervalued.
 
-@st.cache_data(ttl=3600)
-def load_search_options():
-    stock_map = load_nse_stock_list()
-    return sorted(list(stock_map.keys()) + list(ETF_MAP.keys()))
+Data is approximate (early 2026 market conditions) — always verify live on Screener.in / Yahoo Finance / Tickertape.  
+Bond yield used: ~7.6% (AAA corporate India).
+""")
 
-@st.cache_data(ttl=3600)
-def resolve_assets(user_inputs):
-    stock_map = load_nse_stock_list()
-    resolved = {}
-    for item in user_inputs:
-        key = item.upper().strip()
-        if "." in key:
-            resolved[item] = key
-        elif key in ETF_MAP:
-            resolved[item] = ETF_MAP[key]
-        else:
-            matches = get_close_matches(key, stock_map.keys(), n=1, cutoff=0.6)
-            resolved[item] = stock_map[matches[0]] if matches else None
-    return resolved
+# Pre-screened stocks from recent low-PEG GARP screens (examples from Screener.in / Tickertape / Equitymaster)
+# Format: {'Ticker': 'Company Name', 'Current_Price': float, 'EPS': float, 'Growth_pct': float, 'PEG': float}
+screened_stocks = [
+    {'Ticker': 'PREMIER', 'Company': 'Premier Energies', 'Current_Price': 1050, 'EPS': 45, 'Growth_pct': 30, 'PEG': 0.15},
+    {'Ticker': 'WELSPUNCORP', 'Company': 'Welspun Corp', 'Current_Price': 650, 'EPS': 35, 'Growth_pct': 18, 'PEG': 0.37},
+    {'Ticker': 'ZENTECH', 'Company': 'Zen Technologies', 'Current_Price': 1900, 'EPS': 18, 'Growth_pct': 35, 'PEG': 0.13},
+    {'Ticker': 'NATCOPHARM', 'Company': 'Natco Pharma', 'Current_Price': 1300, 'EPS': 55, 'Growth_pct': 18, 'PEG': 0.07},
+    {'Ticker': 'INSOL', 'Company': 'Insolation Energy', 'Current_Price': 280, 'EPS': 12, 'Growth_pct': 40, 'PEG': 0.22},
+    {'Ticker': 'GANESHHOUC', 'Company': 'Ganesh Housing Corp', 'Current_Price': 750, 'EPS': 30, 'Growth_pct': 20, 'PEG': 0.4},
+    {'Ticker': 'SHILCTRN', 'Company': 'Shilchar Technologies', 'Current_Price': 4500, 'EPS': 120, 'Growth_pct': 25, 'PEG': 0.7},
+    # Add more if you want — or expand later with API
+]
 
-# ─── Valuation functions ───────────────────────────────────────────────────
-def peter_lynch_fair_value(eps, growth_pct, div_yield_pct=0):
-    fair_pe = growth_pct + div_yield_pct
-    fair_value = eps * fair_pe if eps > 0 else None
-    return fair_value, fair_pe
+df = pd.DataFrame(screened_stocks)
 
-def graham_intrinsic_value(eps, growth_pct, bond_yield_pct=7.6):
-    if eps <= 0:
-        return None, None
-    base = 8.5 + 2 * growth_pct
-    v = (eps * base * 4.4) / bond_yield_pct
-    mos_30 = v * 0.70  # 30% margin of safety
-    return v, mos_30
+# Calculate valuations
+df['Lynch_Fair_PE'] = df['Growth_pct'] + 1.0  # approx dividend yield 1% average
+df['Lynch_Fair_Value'] = df['EPS'] * df['Lynch_Fair_PE']
 
-# ─── Page ──────────────────────────────────────────────────────────────────
-st.title("🔮 AI Premium Prediction + Valuation")
+df['Graham_Base'] = 8.5 + 2 * df['Growth_pct']
+df['Graham_Intrinsic'] = (df['EPS'] * df['Graham_Base'] * 4.4) / 7.6
+df['Graham_MoS_30'] = df['Graham_Intrinsic'] * 0.70
 
-# Premium check with fallback
-email = st.session_state.get("premium_email", None)
-if not email:
-    email = st.text_input("Confirm your email to access premium features", key="confirm_email_ai")
+# Verdict columns
+df['Lynch_Verdict'] = df.apply(lambda row: 
+    'Undervalued' if row['Current_Price'] < row['Lynch_Fair_Value'] else 
+    'Fairly Valued' if abs(row['Current_Price'] - row['Lynch_Fair_Value']) / row['Lynch_Fair_Value'] < 0.15 else 'Overvalued', axis=1)
 
-if not email or email not in st.session_state.premium_users:
-    st.error("You need premium access to use this page. Go back to the main page and subscribe/verify.")
-    if st.button("← Back to Main Portfolio"):
-        st.switch_page("Home.py")
-    st.stop()
+df['Graham_Verdict'] = df.apply(lambda row: 
+    'Undervalued (with safety)' if row['Current_Price'] < row['Graham_MoS_30'] else 
+    'Fairly Valued' if row['Current_Price'] < row['Graham_Intrinsic'] else 'Overvalued', axis=1)
 
-st.success(f"Premium active for {email}")
-
-# ─── Stock / ETF selector ──────────────────────────────────────────────────
-st.markdown("### Select Stock(s) / ETF(s)")
-
-search_options = load_search_options()
-
-selected_assets = st.multiselect(
-    "🔍 Search & select stocks / ETFs",
-    options=search_options,
-    key="ai_page_selected_assets"
+# Display dashboard table
+st.subheader("Screened Stocks Dashboard")
+st.dataframe(
+    df[['Company', 'Ticker', 'Current_Price', 'PEG', 'Lynch_Fair_Value', 'Lynch_Verdict', 
+        'Graham_Intrinsic', 'Graham_MoS_30', 'Graham_Verdict']],
+    use_container_width=True,
+    column_config={
+        'Current_Price': st.column_config.NumberColumn("Current Price (₹)"),
+        'PEG': st.column_config.NumberColumn("PEG Ratio", format="%.2f"),
+        'Lynch_Fair_Value': st.column_config.NumberColumn("Lynch Fair Value (₹)", format="%.0f"),
+        'Graham_Intrinsic': st.column_config.NumberColumn("Graham Intrinsic (₹)", format="%.0f"),
+        'Graham_MoS_30': st.column_config.NumberColumn("Graham + 30% MoS (₹)", format="%.0f"),
+    }
 )
 
-manual_assets = st.text_input(
-    "✍️ Or manually type names / tickers (comma separated)",
-    "",
-    key="ai_page_manual_assets"
-)
+st.info("""
+**Interpretation Guide**:
+- **Peter Lynch Verdict**: Focuses on growth at reasonable price (PEG < 1 = undervalued).
+- **Graham Verdict**: More conservative — prioritizes margin of safety.
+- **Best opportunities**: Stocks undervalued on **both** (e.g. Premier Energies, Welspun Corp in this snapshot).
+- Data is illustrative — refresh with latest numbers from Screener.in or yfinance.
+""")
 
-user_assets = list(selected_assets) + [x.strip() for x in manual_assets.split(",") if x.strip()]
-
-# Resolve and show valid tickers
-valid_tickers = []
-if user_assets:
-    resolved = resolve_assets(user_assets)
-    valid_tickers = [v for v in resolved.values() if v]
-    if valid_tickers:
-        st.write("Resolved tickers:", ", ".join(valid_tickers))
-    else:
-        st.warning("No valid tickers resolved.")
-
-# Choose ticker for prediction (default first valid)
-chosen_ticker = st.selectbox(
-    "Ticker for AI Prediction & Valuation",
-    options=valid_tickers if valid_tickers else ["RELIANCE.NS"],
-    index=0 if valid_tickers else None
-)
-
-# Horizon
-horizon_map = {"1W": 5, "1M": 21, "3M": 63, "1Y": 252}
-horizon_label = st.selectbox("Prediction Horizon", list(horizon_map.keys()), index=1)
-horizon_days = horizon_map[horizon_label]
-
-# ─── Run button ────────────────────────────────────────────────────────────
-if st.button("Run AI Prediction + Valuation") and chosen_ticker:
-    with st.spinner(f"Analyzing {chosen_ticker}..."):
-        try:
-            # AI Prediction
-            ai_df, analysis = advanced_ai_prediction(chosen_ticker, days=horizon_days)
-            
-            current_data = yf.Ticker(chosen_ticker).history(period="1d")
-            if current_data.empty:
-                st.error("Could not fetch current price.")
-                st.stop()
-                
-            current_price = current_data['Close'].iloc[-1]
-            
-            last_pred = ai_df['Predicted_Price'].iloc[-1]
-            last_lower = ai_df['Lower_Bound'].iloc[-1]
-            last_upper = ai_df['Upper_Bound'].iloc[-1]
-            
-            ret = (last_pred - current_price) / current_price
-            ret_low = (last_lower - current_price) / current_price
-            ret_high = (last_upper - current_price) / current_price
-            
-            st.metric("AI Predicted Return", f"{ret*100:.2f}%")
-            st.write(f"Confidence Range: {ret_low*100:.2f}% to {ret_high*100:.2f}% (Horizon: {horizon_days} days)")
-            
-            st.markdown("### AI Analysis")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Trend", analysis["Trend"])
-            c2.metric("Volatility", analysis["Volatility"])
-            c3.metric("Confidence", analysis["Confidence_Score"])
-            st.info(f"Recommendation: **{analysis['Recommendation']}**")
-            
-            fig_ai = go.Figure()
-            fig_ai.add_trace(go.Scatter(x=ai_df.index, y=ai_df['Predicted_Price'], name='AI Prediction', line=dict(color='purple')))
-            fig_ai.add_trace(go.Scatter(x=ai_df.index, y=ai_df['Upper_Bound'], fill=None, mode='lines', line_color='rgba(0,0,0,0)', showlegend=False))
-            fig_ai.add_trace(go.Scatter(x=ai_df.index, y=ai_df['Lower_Bound'], fill='tonexty', mode='lines', line_color='rgba(0,0,0,0)', fillcolor='rgba(128, 0, 128, 0.2)'))
-            st.plotly_chart(fig_ai, use_container_width=True)
-
-            # ─── Valuation Section ─────────────────────────────────────────────
-            st.markdown("---")
-            st.subheader("Valuation Analysis (Peter Lynch + Benjamin Graham)")
-
-            ticker_obj = yf.Ticker(chosen_ticker)
-            info = ticker_obj.info
-
-            eps = info.get('trailingEps', info.get('forwardEps', None))
-            growth_pct = info.get('earningsGrowth', 0) * 100 if info.get('earningsGrowth') else 15  # fallback
-            div_yield_pct = (info.get('dividendYield', 0) or 0) * 100
-            current_pe = info.get('trailingPE', info.get('forwardPE', None))
-
-            if eps is None or eps <= 0:
-                st.warning("Could not fetch valid EPS data for valuation.")
-            else:
-                # Peter Lynch
-                lynch_fv, lynch_fair_pe = peter_lynch_fair_value(eps, growth_pct, div_yield_pct)
-                peg = current_pe / growth_pct if growth_pct > 0 and current_pe else None
-
-                st.markdown("**Peter Lynch Valuation**")
-                st.write(f"Fair P/E: **{lynch_fair_pe:.1f}x**")
-                if lynch_fv:
-                    st.write(f"Fair Value: **₹{lynch_fv:.0f}**")
-                if peg:
-                    st.write(f"PEG Ratio: **{peg:.2f}** → {'Undervalued' if peg < 1 else 'Fair' if peg <= 1.5 else 'Overvalued'}")
-
-                # Benjamin Graham
-                graham_v, graham_mos = graham_intrinsic_value(eps, growth_pct)
-
-                st.markdown("**Benjamin Graham Valuation** (AAA yield ~7.6%)")
-                if graham_v:
-                    st.write(f"Intrinsic Value: **₹{graham_v:.0f}**")
-                    st.write(f"With 30% Margin of Safety: Buy below **₹{graham_mos:.0f}**")
-
-                # Comparison
-                st.markdown("**Verdict vs Current Price (₹{:.0f})**".format(current_price))
-                if lynch_fv and current_price < lynch_fv:
-                    st.success("Undervalued according to Peter Lynch")
-                elif lynch_fv:
-                    st.warning("Fairly valued or overvalued on Lynch")
-
-                if graham_mos and current_price < graham_mos:
-                    st.success("Undervalued with safety margin (Graham)")
-                elif graham_v:
-                    st.warning("Above Graham margin of safety → consider overvalued")
-
-        except Exception as e:
-            st.error(f"Error during analysis: {e}")
-
-# ─── Navigation ────────────────────────────────────────────────────────────
+# Back button
 st.markdown("---")
-if st.button("← Back to Portfolio Analysis"):
+if st.button("← Back to AI Prediction"):
+    st.switch_page("pages/AI_Prediction.py")
+if st.button("← Back to Portfolio Home"):
     st.switch_page("Home.py")
