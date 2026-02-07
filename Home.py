@@ -17,13 +17,20 @@ import hashlib
 import razorpay             # ← added
 import json                 # ← added
 import time                 # ← added for receipt id
-from auth_store import save_premium_user
+
+# ✅ Persist premium users
+from auth_store import save_premium_user, load_premium_users
 
 st.set_page_config(page_title="Universal Market App", layout="wide")
 
-# Mock database of premium users
+# ============================
+# ✅ Premium Users (Persisted)
+# ============================
 if "premium_users" not in st.session_state:
-    st.session_state.premium_users = set()
+    st.session_state.premium_users = load_premium_users()
+
+if "premium_email" not in st.session_state:
+    st.session_state["premium_email"] = ""
 
 # Razorpay setup – uses secrets
 try:
@@ -188,7 +195,8 @@ st.sidebar.markdown("## 🔮 AI Prediction (Premium)")
 
 ai_enabled = st.sidebar.checkbox("Enable AI Prediction", key="ai_enabled", on_change=trigger_run)
 
-email = st.sidebar.text_input("Email (for premium access)", key="premium_email")
+# ✅ normalize email
+email = st.sidebar.text_input("Email (for premium access)", key="premium_email").strip().lower()
 
 horizon_map = {"1W": 5, "1M": 21, "3M": 63, "1Y": 252}
 horizon_label = st.sidebar.selectbox("Horizon", list(horizon_map.keys()), index=1, key="ai_horizon", on_change=trigger_run)
@@ -381,6 +389,7 @@ if st.session_state.run_analysis:
             if len(tickers) > 1:
                 chosen_ticker = st.selectbox("Select asset for prediction", tickers, index=0)
 
+            # ✅ persisted premium check
             is_premium = email in st.session_state.premium_users
 
             if not is_premium:
@@ -389,7 +398,7 @@ if st.session_state.run_analysis:
                 st.markdown("- Advanced Volatility Analysis")
                 st.markdown("- Confidence Intervals")
                 st.markdown("- AI Recommendations")
-                
+
                 # ─── Razorpay Payment Button ────────────────────────────────────
                 if st.button("Subscribe for ₹999/mo via Razorpay", type="primary"):
                     if client is None:
@@ -450,8 +459,12 @@ if st.session_state.run_analysis:
                                 "razorpay_signature": signature
                             }
                             client.utility.verify_payment_signature(params)
+
+                            # ✅ persist + cache
                             save_premium_user(email)
-                            st.session_state["premium_email"] = email.lower().strip()  # Save for cross-page use
+                            st.session_state.premium_users.add(email)
+                            st.session_state["premium_email"] = email
+
                             del st.session_state.pending_order[email]
                             st.success("Payment verified! Premium features unlocked 🎉")
                             st.rerun()
@@ -464,15 +477,15 @@ if st.session_state.run_analysis:
                 with st.expander("Developer Override (Mock Payment)"):
                     if st.button(f"Simulate Successful Payment (for {email})"):
                         save_premium_user(email)
-                        st.session_state["premium_email"] = email.lower().strip() # Save for cross-page use
+                        st.session_state.premium_users.add(email)
+                        st.session_state["premium_email"] = email
                         st.rerun()
 
             else:
                 st.success(f"✅ Premium Active for {email}")
-                
+
                 if st.button("Open AI Premium Prediction →", type="primary"):
                     st.switch_page("pages/AI_Prediction.py")
 
 else:
     st.info("👈 Select assets / change dates — graphs will auto-update. (You can also click Run Analysis.)")
-
