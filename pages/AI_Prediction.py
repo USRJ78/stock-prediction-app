@@ -1,6 +1,16 @@
 # pages/AI_Prediction.py
-# ✅ Paste exactly into Git repo at: pages/AI_Prediction.py
-# pip requirements: streamlit yfinance pandas numpy plotly
+# ✅ Full updated file (replace your existing pages/AI_Prediction.py with this)
+# ✅ Keeps your existing AI Forecast logic + UI
+# ✅ Auto Value Picks uses ONLY 5Y CAGR (Profit CAGR preferred, Sales CAGR fallback) — NO quarterly growth
+# ✅ Premium email check reads from persisted CSV via auth_store.py (so user won't re-register)
+#
+# Requirements: streamlit, yfinance, pandas, numpy, plotly
+# Also requires:
+#   - utils.py  (must contain advanced_ai_prediction)
+#   - auth_store.py (must contain load_premium_users)
+#
+# Note: This file does NOT change your Home.py graphs/UI. You will only need to ensure Home.py
+# calls save_premium_user(email) on successful premium verification.
 
 import streamlit as st
 import yfinance as yf
@@ -10,12 +20,28 @@ import plotly.graph_objects as go
 from difflib import get_close_matches
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from utils import advanced_ai_prediction  # keep your existing utils
+from utils import advanced_ai_prediction
+from auth_store import load_premium_users
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helpers: NSE list + resolver
+# Reuse same helper functions as home page (but with missing imports fixed)
 # ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_nse_stock_list():
+    """
+    Loads NSE equity list and returns {COMPANY_NAME_UPPER: SYMBOL.NS}
+    If NSE blocks temporarily, returns empty dict (app still works with manual tickers).
+    """
+    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+    try:
+        df = pd.read_csv(url)
+        df["SYMBOL"] = df["SYMBOL"].astype(str).str.upper().str.strip() + ".NS"
+        df["NAME OF COMPANY"] = df["NAME OF COMPANY"].astype(str).str.upper().str.strip()
+        return dict(zip(df["NAME OF COMPANY"], df["SYMBOL"]))
+    except Exception:
+        return {}
+
 ETF_MAP = {
     "NIFTY 50 ETF": "NIFTYBEES.NS",
     "BANK NIFTY ETF": "BANKBEES.NS",
@@ -24,29 +50,8 @@ ETF_MAP = {
 }
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_nse_equity_df():
-    """
-    NSE equity list. Sometimes NSE blocks requests; we fallback to empty.
-    """
-    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-    try:
-        df = pd.read_csv(url)
-        # Normalize columns
-        df["SYMBOL"] = df["SYMBOL"].astype(str).str.upper().str.strip()
-        df["NAME OF COMPANY"] = df["NAME OF COMPANY"].astype(str).str.upper().str.strip()
-        df["TICKER"] = df["SYMBOL"] + ".NS"
-        return df[["NAME OF COMPANY", "SYMBOL", "TICKER"]].dropna()
-    except Exception:
-        return pd.DataFrame(columns=["NAME OF COMPANY", "SYMBOL", "TICKER"])
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_nse_stock_map():
-    df = load_nse_equity_df()
-    return dict(zip(df["NAME OF COMPANY"], df["TICKER"]))
-
-@st.cache_data(ttl=3600, show_spinner=False)
 def load_search_options():
-    stock_map = load_nse_stock_map()
+    stock_map = load_nse_stock_list()
     return sorted(list(stock_map.keys()) + list(ETF_MAP.keys()))
 
 def _looks_like_symbol(s: str) -> bool:
@@ -55,27 +60,31 @@ def _looks_like_symbol(s: str) -> bool:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def resolve_assets(user_inputs):
-    stock_map = load_nse_stock_map()
+    stock_map = load_nse_stock_list()
     resolved = {}
     for item in user_inputs:
         raw = str(item).strip()
         key = raw.upper().strip()
+
         if not key:
             continue
 
+        # already includes suffix
         if key.endswith(".NS") or key.endswith(".BO"):
             resolved[raw] = key
             continue
 
+        # contains dot (power-user), keep as-is
         if "." in key:
             resolved[raw] = key
             continue
 
+        # ETF shortcut
         if key in ETF_MAP:
             resolved[raw] = ETF_MAP[key]
             continue
 
-        # If user typed a symbol-like code, append .NS
+        # Symbol-like -> append .NS
         if _looks_like_symbol(key) and key.isalpha():
             resolved[raw] = f"{key}.NS"
             continue
@@ -88,7 +97,7 @@ def resolve_assets(user_inputs):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Value Screener: Lynch → Graham → MOS
+# Growth: ONLY 5Y CAGR (Profit CAGR preferred, Sales CAGR fallback) — no quarterly growth
 # ─────────────────────────────────────────────────────────────────────────────
 def safe_float(x):
     try:
@@ -100,20 +109,69 @@ def safe_float(x):
     except Exception:
         return np.nan
 
-def cagr(first, last, years):
-    if years <= 0:
+def compute_cagr_5y(series: pd.Series) -> float:
+    """
+    Strict 5Y CAGR (needs ~6 annual points).
+    Returns CAGR in percent.
+    """
+    series = series.dropna()
+    if len(series) < 6:
         return np.nan
-    first = safe_float(first)
-    last = safe_float(last)
-    if not np.isfinite(first) or not np.isfinite(last) or first <= 0 or last <= 0:
-        return np.nan
-    return (last / first) ** (1 / years) - 1
 
+    # yfinance financial series are usually newest -> oldest
+    latest = safe_float(series.iloc[0])
+    oldest = safe_float(series.iloc[-1])
+    years = len(series) - 1
+
+    if not np.isfinite(latest) or not np.isfinite(oldest) or latest <= 0 or oldest <= 0:
+        return np.nan
+
+    return ((latest / oldest) ** (1 / years) - 1) * 100
+
+def get_growth_5y_cagr(ticker: str, default_growth: float):
+    """
+    Returns (growth_pct, source_label)
+    Growth is strictly 5Y CAGR:
+      1) Net Income CAGR
+      2) Total Revenue CAGR
+      3) default fallback
+    """
+    t = yf.Ticker(ticker)
+
+    try:
+        fin = t.financials  # annual income statement
+    except Exception:
+        fin = None
+
+    # 1) Profit CAGR
+    try:
+        if isinstance(fin, pd.DataFrame) and "Net Income" in fin.index:
+            g = compute_cagr_5y(fin.loc["Net Income"])
+            if np.isfinite(g) and g > 0:
+                return float(g), "5Y Profit CAGR"
+    except Exception:
+        pass
+
+    # 2) Sales CAGR
+    try:
+        if isinstance(fin, pd.DataFrame) and "Total Revenue" in fin.index:
+            g = compute_cagr_5y(fin.loc["Total Revenue"])
+            if np.isfinite(g) and g > 0:
+                return float(g), "5Y Sales CAGR"
+    except Exception:
+        pass
+
+    return float(default_growth), "Default growth (fallback)"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Value screener: Lynch → Graham → MOS
+# ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fundamentals(ticker: str) -> dict:
     """
-    Fetch price, EPS, PE, market cap, and try to estimate growth using earnings CAGR.
-    Works best when Yahoo provides earnings data (varies for India).
+    Fetches price, EPS, PE, market cap from Yahoo.
+    Growth is computed via get_growth_5y_cagr() to avoid quarterly growth.
     """
     t = yf.Ticker(ticker)
     try:
@@ -131,41 +189,12 @@ def fetch_fundamentals(ticker: str) -> dict:
     pe = safe_float(info.get("trailingPE"))
     mcap = safe_float(info.get("marketCap"))
 
-    growth_pct = np.nan
-    growth_src = ""
-
-    # Try annual earnings CAGR
-    try:
-        e = t.earnings
-        if isinstance(e, pd.DataFrame) and not e.empty and "Earnings" in e.columns:
-            years = sorted(list(e.index))
-            if len(years) >= 3:
-                first_year = years[0]
-                last_year = years[-1]
-                span = int(last_year) - int(first_year)
-                if span >= 2:
-                    g = cagr(e.loc[first_year, "Earnings"], e.loc[last_year, "Earnings"], span)
-                    if np.isfinite(g):
-                        growth_pct = g * 100
-                        growth_src = f"Earnings CAGR ({first_year}→{last_year})"
-    except Exception:
-        pass
-
-    # Fallback: quarterly growth (rarely populated for India)
-    if not np.isfinite(growth_pct):
-        qg = safe_float(info.get("earningsQuarterlyGrowth"))
-        if np.isfinite(qg):
-            growth_pct = qg * 100
-            growth_src = "earningsQuarterlyGrowth (YoY)"
-
     return {
         "ticker": ticker,
         "price": price,
         "eps": eps,
         "pe": pe,
         "market_cap": mcap,
-        "growth_pct": growth_pct,
-        "growth_src": growth_src,
     }
 
 def peter_lynch_screen(pe, growth_pct, peg_limit):
@@ -174,11 +203,11 @@ def peter_lynch_screen(pe, growth_pct, peg_limit):
 
     if not np.isfinite(pe) or pe <= 0:
         passed = False
-        reasons.append("P/E missing or ≤ 0")
+        reasons.append("P/E not available or ≤ 0")
 
     if not np.isfinite(growth_pct) or growth_pct <= 0:
         passed = False
-        reasons.append("Growth% missing or ≤ 0")
+        reasons.append("5Y CAGR not available or ≤ 0")
 
     peg = np.nan
     if passed:
@@ -188,7 +217,7 @@ def peter_lynch_screen(pe, growth_pct, peg_limit):
             reasons.append("PEG could not be computed")
         elif peg > peg_limit:
             passed = False
-            reasons.append(f"PEG {peg:.2f} > {peg_limit}")
+            reasons.append(f"PEG {peg:.2f} > limit {peg_limit}")
 
     return passed, peg, reasons
 
@@ -198,11 +227,11 @@ def graham_intrinsic_value(eps, growth_pct, bond_yield_pct):
     g and Y are in percent.
     """
     if not np.isfinite(eps) or eps <= 0:
-        return np.nan, "EPS missing or ≤ 0"
+        return np.nan, "EPS not available or ≤ 0"
     if not np.isfinite(growth_pct) or growth_pct < 0:
-        return np.nan, "Growth% missing or < 0"
+        return np.nan, "Growth% not available or < 0"
     if not np.isfinite(bond_yield_pct) or bond_yield_pct <= 0:
-        return np.nan, "Bond yield invalid"
+        return np.nan, "Bond yield not valid"
 
     g = float(np.clip(growth_pct, 0, 25))  # guardrail
     Y = float(bond_yield_pct)
@@ -210,21 +239,17 @@ def graham_intrinsic_value(eps, growth_pct, bond_yield_pct):
     intrinsic = eps * (8.5 + 2 * g) * (4.4 / Y)
     return intrinsic, f"Used g={g:.2f}% (capped 0–25), Y={Y:.2f}%"
 
-def compute_value_row(tk, peg_limit, mos_pct, bond_yield, default_growth):
+def compute_value_row(tk: str, peg_limit: float, mos_pct: float, bond_yield: float, default_growth: float) -> dict:
     f = fetch_fundamentals(tk)
     price = f["price"]
     eps = f["eps"]
     pe = f["pe"]
     mcap = f["market_cap"]
 
-    growth = f["growth_pct"]
-    growth_src = f["growth_src"] if f["growth_src"] else "Yahoo (missing fields)"
-    if not np.isfinite(growth):
-        growth = float(default_growth)
-        growth_src = "Default growth input"
+    growth_pct, growth_src = get_growth_5y_cagr(tk, default_growth)
 
-    lynch_pass, peg, lynch_reasons = peter_lynch_screen(pe, growth, peg_limit)
-    intrinsic, graham_note = graham_intrinsic_value(eps, growth, bond_yield)
+    lynch_pass, peg, lynch_reasons = peter_lynch_screen(pe, growth_pct, peg_limit)
+    intrinsic, graham_note = graham_intrinsic_value(eps, growth_pct, bond_yield)
 
     mos_price = np.nan
     verdict = "N/A"
@@ -243,7 +268,7 @@ def compute_value_row(tk, peg_limit, mos_pct, bond_yield, default_growth):
         "Current Price": price,
         "P/E": pe,
         "EPS (TTM)": eps,
-        "Growth % (g)": growth,
+        "Growth % (g)": growth_pct,
         "Growth Source": growth_src,
         "PEG": peg,
         "Lynch Screen": "PASS" if lynch_pass else "FAIL",
@@ -257,42 +282,46 @@ def compute_value_row(tk, peg_limit, mos_pct, bond_yield, default_growth):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Page UI
+# Page content
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="AI Premium Prediction", layout="wide")
 st.title("🔮 AI Premium Prediction")
 
-# Premium check (safe)
+# Premium check (persisted) with fallback input
 email = st.session_state.get("premium_email", None)
 if not email:
-    email = st.text_input("Confirm your email to access premium features", key="confirm_email_ai_page")
+    email = st.text_input("Confirm your email to access premium features", key="confirm_email_ai_page").strip()
 
-premium_users = st.session_state.get("premium_users", set())
-if not email or email not in premium_users:
+premium_users = load_premium_users()
+
+if not email or email.lower().strip() not in premium_users:
     st.error("Premium access required for this page. Please return to the main page and subscribe/verify.")
     if st.button("← Back to Portfolio"):
-        st.switch_page("Home.py")
+        st.switch_page("Home.py")  # change if your main file is different
     st.stop()
 
-st.success(f"Premium active for {email}")
+st.session_state["premium_email"] = email.lower().strip()
+st.success(f"Premium active for {st.session_state['premium_email']}")
 
-tabs = st.tabs(["🤖 AI Forecast", "✨ Auto Value Picks (Lynch→Graham→MOS)", "📄 Screener.in CSV (Optional)"])
+tabs = st.tabs(["🤖 AI Forecast", "✨ Auto Value Picks (5Y CAGR)"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 1: AI Forecast (kept)
+# TAB 1: AI Forecast (your previous flow, kept)
 # ─────────────────────────────────────────────────────────────────────────────
 with tabs[0]:
     st.subheader("🤖 AI Forecast")
 
     st.markdown("### Select Stock(s) / ETF(s)")
+
     search_options = load_search_options()
 
     selected_assets = st.multiselect(
-        "🔍 Search & select stocks / ETFs (optional)",
+        "🔍 Search & select stocks / ETFs",
         options=search_options,
         key="ai_page_selected_assets"
     )
+
     manual_assets = st.text_input(
         "✍️ Or manually type names / tickers (comma separated)",
         "",
@@ -301,6 +330,7 @@ with tabs[0]:
 
     user_assets = list(selected_assets) + [x.strip() for x in manual_assets.split(",") if x.strip()]
 
+    # Resolve and display valid tickers
     valid_tickers = []
     if user_assets:
         resolved = resolve_assets(user_assets)
@@ -308,27 +338,30 @@ with tabs[0]:
         if valid_tickers:
             st.write("Resolved tickers:", ", ".join(valid_tickers))
         else:
-            st.warning("No valid tickers could be resolved. Try RELIANCE.NS")
+            st.warning("No valid tickers could be resolved from your selection.")
 
+    # Choose the ticker to predict
     if valid_tickers:
         chosen_ticker = st.selectbox("Select asset for prediction", options=valid_tickers, index=0)
     else:
         chosen_ticker = st.text_input("Enter ticker manually (fallback)", "RELIANCE.NS").upper().strip()
 
+    # Horizon selection
     horizon_map = {"1W": 5, "1M": 21, "3M": 63, "1Y": 252}
     horizon_label = st.selectbox("Prediction Horizon", list(horizon_map.keys()), index=1)
     horizon_days = horizon_map[horizon_label]
 
+    # Run AI Prediction
     if st.button("Run AI Prediction", key="run_ai_pred") and chosen_ticker:
         with st.spinner(f"AI Agent is analyzing {chosen_ticker}..."):
             try:
                 ai_df, analysis = advanced_ai_prediction(chosen_ticker, days=horizon_days)
 
                 current_data = yf.Ticker(chosen_ticker).history(period="1d")
-                if current_data.empty:
-                    st.error("Could not fetch current price for return calculation.")
-                else:
+
+                if not current_data.empty:
                     current_price = float(current_data["Close"].iloc[-1])
+
                     last_pred = float(ai_df["Predicted_Price"].iloc[-1])
                     last_lower = float(ai_df["Lower_Bound"].iloc[-1])
                     last_upper = float(ai_df["Upper_Bound"].iloc[-1])
@@ -343,41 +376,52 @@ with tabs[0]:
                         f"(Horizon: {horizon_days} trading days)"
                     )
 
+                    st.markdown("### AI Analysis")
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Trend", str(analysis.get("Trend", "N/A")))
                     c2.metric("Volatility", str(analysis.get("Volatility", "N/A")))
                     c3.metric("Confidence", str(analysis.get("Confidence_Score", "N/A")))
+
                     st.info(f"Recommendation: **{analysis.get('Recommendation', 'N/A')}**")
 
                     fig_ai = go.Figure()
-                    fig_ai.add_trace(go.Scatter(x=ai_df.index, y=ai_df["Predicted_Price"], name="AI Prediction"))
                     fig_ai.add_trace(go.Scatter(
-                        x=ai_df.index, y=ai_df["Upper_Bound"],
-                        fill=None, mode="lines",
-                        line_color="rgba(0,0,0,0)", showlegend=False
+                        x=ai_df.index,
+                        y=ai_df["Predicted_Price"],
+                        name="AI Prediction",
+                        line=dict(color="purple")
                     ))
                     fig_ai.add_trace(go.Scatter(
-                        x=ai_df.index, y=ai_df["Lower_Bound"],
-                        fill="tonexty", mode="lines",
+                        x=ai_df.index,
+                        y=ai_df["Upper_Bound"],
+                        fill=None,
+                        mode="lines",
                         line_color="rgba(0,0,0,0)",
-                        name="Confidence Interval", fillcolor="rgba(128, 0, 128, 0.2)"
+                        showlegend=False
                     ))
-                    st.plotly_chart(fig_ai, use_container_width=True)
+                    fig_ai.add_trace(go.Scatter(
+                        x=ai_df.index,
+                        y=ai_df["Lower_Bound"],
+                        fill="tonexty",
+                        mode="lines",
+                        line_color="rgba(0,0,0,0)",
+                        name="Confidence Interval",
+                        fillcolor="rgba(128, 0, 128, 0.2)"
+                    ))
 
+                    st.plotly_chart(fig_ai, use_container_width=True)
+                else:
+                    st.error("Could not fetch current price for return calculation.")
             except Exception as e:
                 st.error(f"Prediction error: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 2: Auto Value Picks (no manual screening by user)
+# TAB 2: Auto Value Picks (ONLY 5Y CAGR)
 # ─────────────────────────────────────────────────────────────────────────────
 with tabs[1]:
-    st.subheader("✨ Auto Value Picks (Lynch → Graham → 30% MOS)")
-
-    st.caption(
-        "This automatically scans a stock universe and returns a shortlist. "
-        "No manual selection needed."
-    )
+    st.subheader("✨ Auto Value Picks (Lynch → Graham → 30% MOS) using 5Y CAGR")
+    st.caption("Growth (g) is strictly 5Y CAGR: Profit CAGR preferred, Sales CAGR fallback. No quarterly growth.")
 
     cA, cB, cC, cD = st.columns([1.0, 1.0, 1.0, 1.0])
     with cA:
@@ -387,38 +431,53 @@ with tabs[1]:
     with cC:
         bond_yield = st.number_input(
             "Bond yield used in Graham formula (%)",
-            min_value=0.5, max_value=20.0, value=8.0, step=0.1,
+            min_value=0.5,
+            max_value=20.0,
+            value=8.0,
+            step=0.1,
             help="Set an India-appropriate corporate/AAA yield you trust."
         )
     with cD:
         default_growth = st.number_input(
-            "Default growth% (if missing)",
-            min_value=0.0, max_value=30.0, value=12.0, step=0.5
+            "Default growth% (fallback if 5Y CAGR missing)",
+            min_value=0.0,
+            max_value=30.0,
+            value=12.0,
+            step=0.5
         )
 
-    # Universe config (not “manual stock picking”, just performance control)
+    # Universe config (for runtime control)
     c1, c2 = st.columns([1, 1])
     with c1:
         universe_size = st.slider(
-            "Universe size (auto-picked by market cap)", 100, 700, 300, 50,
+            "Universe size (Top by market cap)",
+            min_value=100,
+            max_value=700,
+            value=300,
+            step=50,
             help="Larger universe = slower. Default 300 is a good balance."
         )
     with c2:
-        top_n = st.slider("Show top N results", 10, 100, 30, 5)
+        top_n = st.slider("Show top N results", min_value=10, max_value=100, value=30, step=5)
 
-    df_nse = load_nse_equity_df()
+    # Build universe: NSE list → top by market cap
+    df_nse = None
+    try:
+        # reuse NSE company list to get tickers
+        stock_map = load_nse_stock_list()
+        tickers_all = list(stock_map.values())
+        df_nse = pd.DataFrame({"TICKER": tickers_all})
+    except Exception:
+        df_nse = pd.DataFrame()
+
     if df_nse.empty:
-        st.error("Could not load NSE equity list right now. Try again later or use Screener CSV tab.")
+        st.error("Could not load NSE equity list right now. Try again later.")
     else:
-        # Step 1: pick top by market cap (requires marketCap fetch, but we do it fast-ish with threading)
-        all_tickers = df_nse["TICKER"].tolist()
-
         if st.button("Run Auto Screening", type="primary"):
-            with st.spinner("Step 1/3: Estimating market caps to select universe..."):
-                # Fetch only market cap for many tickers (still uses get_info under the hood, cached)
-                # We do threading to make it tolerable.
+            max_workers = 24
+
+            with st.spinner("Step 1/2: Selecting universe by market cap..."):
                 mcap_rows = []
-                max_workers = 24
 
                 def mcap_only(tk):
                     f = fetch_fundamentals(tk)
@@ -426,145 +485,62 @@ with tabs[1]:
 
                 futures = []
                 with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                    for tk in all_tickers[:2000]:  # NSE equity list can be >2000; cap to avoid insane runtime
+                    # cap to avoid ultra long runs if NSE list is huge
+                    for tk in df_nse["TICKER"].tolist()[:2000]:
                         futures.append(ex.submit(mcap_only, tk))
-
                     for fut in as_completed(futures):
                         tk, mc = fut.result()
                         if np.isfinite(mc) and mc > 0:
                             mcap_rows.append((tk, mc))
 
                 if not mcap_rows:
-                    st.error("Could not fetch market caps. Try smaller universe later or use Screener CSV tab.")
-                else:
-                    mcap_df = pd.DataFrame(mcap_rows, columns=["Ticker", "MktCap"]).sort_values("MktCap", ascending=False)
-                    universe = mcap_df["Ticker"].head(universe_size).tolist()
+                    st.error("Could not fetch market caps right now (Yahoo may be throttling). Try again.")
+                    st.stop()
 
-                    with st.spinner("Step 2/3: Running Peter Lynch screen (P/E, growth, PEG)..."):
-                        # Step 2+3 combined: compute value row for each ticker
-                        rows = []
-                        futures2 = []
-                        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                            for tk in universe:
-                                futures2.append(ex.submit(
-                                    compute_value_row, tk, peg_limit, mos_pct, bond_yield, default_growth
-                                ))
-                            for fut in as_completed(futures2):
-                                rows.append(fut.result())
+                mcap_df = pd.DataFrame(mcap_rows, columns=["Ticker", "MktCap"]).sort_values("MktCap", ascending=False)
+                universe = mcap_df["Ticker"].head(universe_size).tolist()
 
-                        df = pd.DataFrame(rows)
+            with st.spinner("Step 2/2: Running Lynch → Graham → MOS (5Y CAGR)..."):
+                rows = []
+                futures2 = []
+                with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    for tk in universe:
+                        futures2.append(ex.submit(compute_value_row, tk, peg_limit, mos_pct, bond_yield, default_growth))
+                    for fut in as_completed(futures2):
+                        rows.append(fut.result())
 
-                    with st.spinner("Step 3/3: Building shortlist..."):
-                        # Shortlist rules: Lynch PASS + Undervalued with MOS
-                        df["Mkt Cap"] = pd.to_numeric(df["Mkt Cap"], errors="coerce")
-                        df_sorted = df.sort_values("Mkt Cap", ascending=False)
+                df = pd.DataFrame(rows)
 
-                        shortlist = df[
-                            (df["Lynch Screen"] == "PASS") &
-                            (df["Verdict"] == "Undervalued ✅")
-                        ].copy()
+            shortlist = df[
+                (df["Lynch Screen"] == "PASS") &
+                (df["Verdict"] == "Undervalued ✅")
+            ].copy().sort_values("MOS Gap % (MOS - Price)", ascending=False)
 
-                        shortlist = shortlist.sort_values("MOS Gap % (MOS - Price)", ascending=False)
+            st.success("Auto screening complete ✅")
 
-                    st.success("Auto screening complete ✅")
-
-                    st.markdown("### Shortlist (Lynch PASS + Undervalued with MOS)")
-                    if shortlist.empty:
-                        st.info("No stocks met both conditions with current inputs. Try raising PEG limit or growth default.")
-                    else:
-                        st.dataframe(
-                            shortlist.head(top_n)[[
-                                "Ticker", "Current Price", "P/E", "Growth % (g)", "PEG",
-                                "Graham Intrinsic", f"MOS Price ({mos_pct}%)", "MOS Gap % (MOS - Price)",
-                                "Growth Source"
-                            ]],
-                            use_container_width=True
-                        )
-
-                    st.markdown("### Full scan results (for transparency)")
-                    st.dataframe(df_sorted, use_container_width=True)
-
-                    st.markdown("### Notes")
-                    st.write(
-                        "- Yahoo data for Indian stocks can be incomplete; when growth is missing, the **default growth%** is used.\n"
-                        "- If you want higher accuracy, use the Screener CSV tab (export → upload) and then apply Graham+MOS."
-                    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 3: Screener.in CSV upload (compliant approach)
-# ─────────────────────────────────────────────────────────────────────────────
-with tabs[2]:
-    st.subheader("📄 Screener.in CSV (Optional) → Apply Graham + MOS")
-
-    st.caption(
-        "Screener.in doesn’t provide an API; the compliant way is: "
-        "export your Screen results to CSV and upload here, then we apply Graham+MOS."
-    )
-
-    cA, cB, cC = st.columns([1, 1, 1])
-    with cA:
-        mos_pct2 = st.number_input("Margin of Safety (%)", min_value=0, max_value=80, value=30, step=1, key="mos2")
-    with cB:
-        bond_yield2 = st.number_input(
-            "Bond yield used in Graham formula (%)",
-            min_value=0.5, max_value=20.0, value=8.0, step=0.1, key="y2"
-        )
-    with cC:
-        default_growth2 = st.number_input("Default growth% (if missing)", 0.0, 30.0, 12.0, 0.5, key="g2")
-
-    uploaded = st.file_uploader("Upload Screener.in exported CSV", type=["csv"])
-
-    if uploaded is not None:
-        try:
-            df_up = pd.read_csv(uploaded)
-            st.write("Preview:")
-            st.dataframe(df_up.head(20), use_container_width=True)
-
-            # Try to find NSE symbol column
-            # Screener exports typically include NSE Code / BSE Code / etc.
-            possible_cols = [c for c in df_up.columns if str(c).strip().lower() in {"nse", "nse code", "nsecode", "nse_symbol", "symbol"}]
-            col = possible_cols[0] if possible_cols else None
-
-            if col is None:
-                st.error("Could not find an NSE code column. Please ensure your CSV includes 'NSE' or 'NSE Code'.")
+            st.markdown("### Shortlist (Lynch PASS + Undervalued with MOS)")
+            if shortlist.empty:
+                st.info("No stocks met both conditions with current inputs. Try adjusting PEG limit or default growth.")
             else:
-                tickers = []
-                for x in df_up[col].dropna().astype(str):
-                    sym = x.upper().strip()
-                    if not sym.endswith(".NS"):
-                        sym = sym + ".NS"
-                    tickers.append(sym)
+                st.dataframe(
+                    shortlist.head(top_n)[[
+                        "Ticker",
+                        "Current Price",
+                        "P/E",
+                        "Growth % (g)",
+                        "PEG",
+                        "Graham Intrinsic",
+                        f"MOS Price ({mos_pct}%)",
+                        "MOS Gap % (MOS - Price)",
+                        "Growth Source"
+                    ]],
+                    use_container_width=True
+                )
 
-                tickers = list(dict.fromkeys(tickers))
-                st.write(f"Found {len(tickers)} tickers.")
+            st.markdown("### Full scan results (sorted by market cap)")
+            st.dataframe(df.sort_values("Mkt Cap", ascending=False), use_container_width=True)
 
-                if st.button("Apply Graham + MOS to Screener results", type="primary"):
-                    with st.spinner("Calculating intrinsic values..."):
-                        rows = []
-                        max_workers = 24
-                        futures = []
-                        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                            for tk in tickers[:800]:
-                                futures.append(ex.submit(
-                                    compute_value_row, tk, 999.0, mos_pct2, bond_yield2, default_growth2
-                                ))
-                            for fut in as_completed(futures):
-                                rows.append(fut.result())
-
-                        out = pd.DataFrame(rows)
-                        out = out.sort_values("MOS Gap % (MOS - Price)", ascending=False)
-
-                    st.markdown("### Results (sorted by best MOS gap)")
-                    st.dataframe(out, use_container_width=True)
-
-        except Exception as e:
-            st.error(f"CSV read error: {e}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Navigation
-# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 if st.button("← Back to Portfolio Analysis"):
-    st.switch_page("Home.py")
+    st.switch_page("Home.py")  # change if your main file is different
