@@ -17,6 +17,7 @@ import hashlib
 import razorpay             # ← added
 import json                 # ← added
 import time                 # ← added for receipt id
+from auth_store import save_premium_user
 
 st.set_page_config(page_title="Universal Market App", layout="wide")
 
@@ -449,8 +450,8 @@ if st.session_state.run_analysis:
                                 "razorpay_signature": signature
                             }
                             client.utility.verify_payment_signature(params)
-                            st.session_state.premium_users.add(email)
-                            st.session_state["premium_email"] = email  # Save for cross-page use
+                            save_premium_user(email)
+                            st.session_state["premium_email"] = email.lower().strip()  # Save for cross-page use
                             del st.session_state.pending_order[email]
                             st.success("Payment verified! Premium features unlocked 🎉")
                             st.rerun()
@@ -462,8 +463,8 @@ if st.session_state.run_analysis:
                 # Optional dev mock (keep or remove)
                 with st.expander("Developer Override (Mock Payment)"):
                     if st.button(f"Simulate Successful Payment (for {email})"):
-                        st.session_state.premium_users.add(email)
-                        st.session_state["premium_email"] = email  # Save for cross-page use
+                        save_premium_user(email)
+                        st.session_state["premium_email"] = email.lower().strip() # Save for cross-page use
                         st.rerun()
 
             else:
@@ -474,3 +475,4 @@ if st.session_state.run_analysis:
 
 else:
     st.info("👈 Select assets / change dates — graphs will auto-update. (You can also click Run Analysis.)")
+
