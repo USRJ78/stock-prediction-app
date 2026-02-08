@@ -17,6 +17,7 @@ import hashlib
 import razorpay             # ← added
 import json                 # ← added
 import time                 # ← added for receipt id
+from io import StringIO     # ✅ added for robust NSE CSV parsing
 
 # ✅ Persist premium users
 from auth_store import save_premium_user, load_premium_users
@@ -67,12 +68,33 @@ def trigger_run():
 
 # ------------------ Helpers ------------------
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_nse_stock_list():
+    """
+    Robust NSE list loader.
+    NSE often blocks plain urllib/pandas read_csv (HTTP 403/406/429).
+    This uses requests with browser-like headers and NEVER crashes the app.
+    """
     url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-    df = pd.read_csv(url)
-    df["SYMBOL"] = df["SYMBOL"].astype(str) + ".NS"
-    return dict(zip(df["NAME OF COMPANY"].str.upper(), df["SYMBOL"]))
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "Accept": "text/csv,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/",
+        "Connection": "keep-alive",
+    }
+
+    try:
+        r = requests.get(url, headers=headers, timeout=20)
+        r.raise_for_status()
+        df = pd.read_csv(StringIO(r.text))
+
+        df["SYMBOL"] = df["SYMBOL"].astype(str).str.upper().str.strip() + ".NS"
+        df["NAME OF COMPANY"] = df["NAME OF COMPANY"].astype(str).str.upper().str.strip()
+        return dict(zip(df["NAME OF COMPANY"], df["SYMBOL"]))
+    except Exception:
+        # fallback: empty dict => app still works (manual tickers + ETFs)
+        return {}
 
 ETF_MAP = {
     "NIFTY 50 ETF": "NIFTYBEES.NS",
@@ -81,22 +103,24 @@ ETF_MAP = {
     "IT ETF": "ITBEES.NS",
 }
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def resolve_assets(user_inputs):
-    stock_map = load_nse_stock_list()
+    stock_map = load_nse_stock_list() or {}
     resolved = {}
     for item in user_inputs:
-        key = item.upper().strip()
+        key = str(item).upper().strip()
+        if not key:
+            continue
         if "." in key:
             resolved[item] = key
         elif key in ETF_MAP:
             resolved[item] = ETF_MAP[key]
         else:
-            matches = get_close_matches(key, stock_map.keys(), n=1, cutoff=0.6)
+            matches = get_close_matches(key, stock_map.keys(), n=1, cutoff=0.6) if stock_map else []
             resolved[item] = stock_map[matches[0]] if matches else None
     return resolved
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False)
 def load_prices(tickers, start, end):
     tickers = sorted(list(set(tickers)))
     data = yf.download(tickers, start=start, end=end, auto_adjust=True, progress=False)["Close"]
@@ -124,12 +148,16 @@ def price_scaling(raw_prices_df):
 
 st.sidebar.header("Inputs")
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_search_options():
-    stock_map = load_nse_stock_list()
+    stock_map = load_nse_stock_list() or {}
     return sorted(list(stock_map.keys()) + list(ETF_MAP.keys()))
 
 search_options = load_search_options()
+
+# If NSE list failed, only ETFs show → warn user
+if len(search_options) <= len(ETF_MAP):
+    st.sidebar.warning("NSE stock list temporarily unavailable. You can still type tickers manually (e.g., RELIANCE.NS).")
 
 selected_assets = st.sidebar.multiselect(
     "🔍 Search & select stocks / ETFs (recommended)",
@@ -375,7 +403,7 @@ if st.session_state.run_analysis:
         st.dataframe(best_df)
 
     # ============================
-    # 🔮 Premium AI Prediction Panel (Main) – ONLY THIS PART CHANGED
+    # 🔮 Premium AI Prediction Panel (Main)
     # ============================
     if ai_enabled:
         st.markdown("---")
@@ -384,12 +412,11 @@ if st.session_state.run_analysis:
         if not email:
             st.warning("Enter your email in the sidebar to use the Premium AI feature.")
         else:
-            # if multiple selected, let user choose; otherwise auto
             chosen_ticker = tickers[0]
             if len(tickers) > 1:
                 chosen_ticker = st.selectbox("Select asset for prediction", tickers, index=0)
 
-            # ✅ persisted premium check
+            # ✅ persisted premium check (session cached)
             is_premium = email in st.session_state.premium_users
 
             if not is_premium:
@@ -399,7 +426,6 @@ if st.session_state.run_analysis:
                 st.markdown("- Confidence Intervals")
                 st.markdown("- AI Recommendations")
 
-                # ─── Razorpay Payment Button ────────────────────────────────────
                 if st.button("Subscribe for ₹999/mo via Razorpay", type="primary"):
                     if client is None:
                         st.error("Razorpay not configured – check secrets.")
@@ -439,14 +465,12 @@ if st.session_state.run_analysis:
                             """
                             st.components.v1.html(js_code, height=1)
                             st.info("Payment popup should appear. Complete payment, then copy Payment ID & Signature from the alert or Razorpay dashboard → use the form below to verify.")
-                            # Store for verification
                             if "pending_order" not in st.session_state:
                                 st.session_state.pending_order = {}
                             st.session_state.pending_order[email] = order_id
                         except Exception as e:
                             st.error(f"Failed to create order: {e}")
 
-                # Verification section
                 if email in st.session_state.get("pending_order", {}):
                     st.markdown("### Verify Your Payment")
                     payment_id = st.text_input("Razorpay Payment ID", key=f"pid_{email}")
@@ -473,7 +497,6 @@ if st.session_state.run_analysis:
                         except Exception as e:
                             st.error(f"Error during verification: {e}")
 
-                # Optional dev mock (keep or remove)
                 with st.expander("Developer Override (Mock Payment)"):
                     if st.button(f"Simulate Successful Payment (for {email})"):
                         save_premium_user(email)
