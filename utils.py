@@ -1,49 +1,71 @@
-# utils.py
-# Shared utilities - NSE stock list loader used by both Home.py and AI_Prediction.py
-
-import streamlit as st
+import yfinance as yf
 import pandas as pd
-import requests
-from io import StringIO
-import os
+import numpy as np
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_nse_stock_list():
+def get_stock_data(ticker, period="1y"):
     """
-    Load NSE equity master list.
-    Priority: 1) Live URL  2) Local data/EQUITY_L.csv
-    Returns: dict { "NAME OF COMPANY UPPER": "SYMBOL.NS" } or empty dict on failure
+    Fetches stock data for a given ticker.
     """
-    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/csv,*/*;q=0.9",
-        "Referer": "https://www.nseindia.com/",
+    stock = yf.Ticker(ticker)
+    data = stock.history(period=period)
+    return data
+
+def simple_prediction(data, days=30):
+    """
+    Simple prediction using Moving Average.
+    """
+    data['MA_50'] = data['Close'].rolling(window=50).mean()
+    last_ma = data['MA_50'].iloc[-1]
+    
+    # Generate future dates
+    last_date = data.index[-1]
+    future_dates = pd.date_range(start=last_date, periods=days + 1)[1:]
+    
+    # Simple linear projection (mock AI)
+    predictions = [last_ma * (1 + np.random.normal(0, 0.01)) for _ in range(days)]
+    
+    return pd.DataFrame({'Date': future_dates, 'Predicted_Price': predictions}).set_index('Date')
+
+def advanced_ai_prediction(ticker, days=30):
+    """
+    Simulates a premium AI agent prediction.
+    In a real app, this would use a more complex model or API.
+    """
+    # Mocking a "thinking" process and advanced result
+    data = get_stock_data(ticker, period="2y")
+    
+    # Mock advanced analysis
+    volatility = data['Close'].std()
+    trend = "Bullish" if data['Close'].iloc[-1] > data['Close'].iloc[0] else "Bearish"
+    
+    # Generate 'smarter' predictions with confidence intervals
+    last_price = data['Close'].iloc[-1]
+    future_dates = pd.date_range(start=data.index[-1], periods=days + 1)[1:]
+    
+    predictions = []
+    lower_bounds = []
+    upper_bounds = []
+    
+    current_price = last_price
+    for _ in range(days):
+        change = np.random.normal(0, volatility * 0.05) # Reduced volatility for prediction
+        current_price += change
+        predictions.append(current_price)
+        lower_bounds.append(current_price - (volatility * 0.1))
+        upper_bounds.append(current_price + (volatility * 0.1))
+        
+    df = pd.DataFrame({
+        'Date': future_dates,
+        'Predicted_Price': predictions,
+        'Lower_Bound': lower_bounds,
+        'Upper_Bound': upper_bounds
+    }).set_index('Date')
+    
+    analysis = {
+        "Trend": trend,
+        "Volatility": f"{volatility:.2f}",
+        "Recommendation": "Buy" if trend == "Bullish" else "Sell",
+        "Confidence_Score": "87%" # Mock score
     }
-
-    def parse_df(df: pd.DataFrame) -> dict:
-        df["SYMBOL"] = df["SYMBOL"].astype(str).str.upper().str.strip() + ".NS"
-        df["NAME OF COMPANY"] = df["NAME OF COMPANY"].astype(str).str.upper().str.strip()
-        return dict(zip(df["NAME OF COMPANY"], df["SYMBOL"]))
-
-    # 1. Live attempt
-    try:
-        r = requests.get(url, headers=headers, timeout=12)
-        r.raise_for_status()
-        df = pd.read_csv(StringIO(r.text))
-        if not df.empty and "SYMBOL" in df.columns:
-            return parse_df(df)
-    except Exception:
-        pass
-
-    # 2. Local fallback
-    local_path = "data/EQUITY_L.csv"
-    try:
-        if os.path.exists(local_path):
-            df = pd.read_csv(local_path)
-            if not df.empty and "SYMBOL" in df.columns:
-                return parse_df(df)
-    except Exception:
-        pass
-
-    return {}
+    
+    return df, analysis
