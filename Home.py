@@ -420,3 +420,4 @@ if st.session_state.run_analysis:
 
 else:
     st.info("Select assets / adjust inputs → graphs update automatically.")
+
