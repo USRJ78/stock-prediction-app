@@ -1,5 +1,7 @@
 # pages/AI_Prediction.py
 # ✅ FULL UPDATED FILE (replace your existing pages/AI_Prediction.py with this)
+#
+# Fixes + Features:
 # ✅ Premium email check uses persisted CSV (auth_store.load_premium_users)
 # ✅ Auto Value Picks uses ONLY 5Y CAGR (Profit CAGR preferred, Sales CAGR fallback)
 # ✅ NEW: From shortlisted undervalued Lynch stocks:
@@ -7,6 +9,14 @@
 #    - Pick least-correlated basket
 #    - "Target-to-MOS" portfolio value projection
 #    - Monte Carlo optimization + Sharpe-like ratio
+# ✅ IMPORTANT FIX: Screening results persist across widget changes
+#    - Stores df/shortlist/params in st.session_state
+#    - Lets you tweak amount/lookback/pick_n/etc without losing results
+#
+# Requirements: streamlit, yfinance, pandas, numpy, plotly, seaborn, matplotlib
+# Also requires:
+#   - utils.py  (advanced_ai_prediction)
+#   - auth_store.py (load_premium_users)
 
 import streamlit as st
 import yfinance as yf
@@ -25,7 +35,7 @@ from auth_store import load_premium_users
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NSE list + resolver helpers (same idea as your Home)
+# NSE list + resolver helpers
 # ─────────────────────────────────────────────────────────────────────────────
 ETF_MAP = {
     "NIFTY 50 ETF": "NIFTYBEES.NS",
@@ -288,7 +298,6 @@ def pick_least_correlated(corr_df: pd.DataFrame, n: int):
     corr_vals = corr_df.copy()
     np.fill_diagonal(corr_vals.values, np.nan)
 
-    # start pair
     i, j = np.unravel_index(np.nanargmin(corr_vals.values), corr_vals.shape)
     chosen = [tickers[i], tickers[j]]
 
@@ -320,7 +329,7 @@ premium_users = load_premium_users()
 if not email or email.lower().strip() not in premium_users:
     st.error("Premium access required for this page. Please return to the main page and subscribe/verify.")
     if st.button("← Back to Portfolio"):
-        st.switch_page("Home.py")  # adjust if your main filename is different
+        st.switch_page("Home.py")
     st.stop()
 
 st.session_state["premium_email"] = email.lower().strip()
@@ -338,17 +347,8 @@ with tabs[0]:
 
     search_options = load_search_options()
 
-    selected_assets = st.multiselect(
-        "🔍 Search & select stocks / ETFs",
-        options=search_options,
-        key="ai_page_selected_assets"
-    )
-
-    manual_assets = st.text_input(
-        "✍️ Or manually type names / tickers (comma separated)",
-        "",
-        key="ai_page_manual_assets"
-    )
+    selected_assets = st.multiselect("🔍 Search & select stocks / ETFs", options=search_options, key="ai_page_selected_assets")
+    manual_assets = st.text_input("✍️ Or manually type names / tickers (comma separated)", "", key="ai_page_manual_assets")
 
     user_assets = list(selected_assets) + [x.strip() for x in manual_assets.split(",") if x.strip()]
 
@@ -362,97 +362,113 @@ with tabs[0]:
             st.warning("No valid tickers could be resolved from your selection.")
 
     if valid_tickers:
-        chosen_ticker = st.selectbox("Select asset for prediction", options=valid_tickers, index=0)
+        chosen_ticker = st.selectbox("Select asset for prediction", options=valid_tickers, index=0, key="ai_chosen")
     else:
-        chosen_ticker = st.text_input("Enter ticker manually (fallback)", "RELIANCE.NS").upper().strip()
+        chosen_ticker = st.text_input("Enter ticker manually (fallback)", "RELIANCE.NS", key="ai_fallback").upper().strip()
 
     horizon_map = {"1W": 5, "1M": 21, "3M": 63, "1Y": 252}
-    horizon_label = st.selectbox("Prediction Horizon", list(horizon_map.keys()), index=1)
+    horizon_label = st.selectbox("Prediction Horizon", list(horizon_map.keys()), index=1, key="ai_horizon")
     horizon_days = horizon_map[horizon_label]
 
-    if st.button("Run AI Prediction", key="run_ai_pred") and chosen_ticker:
-        with st.spinner(f"AI Agent is analyzing {chosen_ticker}..."):
-            try:
-                ai_df, analysis = advanced_ai_prediction(chosen_ticker, days=horizon_days)
-                current_data = yf.Ticker(chosen_ticker).history(period="1d")
+    if st.button("Run AI Prediction", key="run_ai_pred"):
+        if not chosen_ticker:
+            st.warning("Enter a ticker.")
+        else:
+            with st.spinner(f"AI Agent is analyzing {chosen_ticker}..."):
+                try:
+                    ai_df, analysis = advanced_ai_prediction(chosen_ticker, days=horizon_days)
+                    current_data = yf.Ticker(chosen_ticker).history(period="1d")
 
-                if not current_data.empty:
-                    current_price = float(current_data["Close"].iloc[-1])
+                    if not current_data.empty:
+                        current_price = float(current_data["Close"].iloc[-1])
 
-                    last_pred = float(ai_df["Predicted_Price"].iloc[-1])
-                    last_lower = float(ai_df["Lower_Bound"].iloc[-1])
-                    last_upper = float(ai_df["Upper_Bound"].iloc[-1])
+                        last_pred = float(ai_df["Predicted_Price"].iloc[-1])
+                        last_lower = float(ai_df["Lower_Bound"].iloc[-1])
+                        last_upper = float(ai_df["Upper_Bound"].iloc[-1])
 
-                    ret = (last_pred - current_price) / current_price
-                    ret_low = (last_lower - current_price) / current_price
-                    ret_high = (last_upper - current_price) / current_price
+                        ret = (last_pred - current_price) / current_price
+                        ret_low = (last_lower - current_price) / current_price
+                        ret_high = (last_upper - current_price) / current_price
 
-                    st.metric("Predicted Return", f"{ret*100:.2f}%")
-                    st.write(
-                        f"Confidence Range: {ret_low*100:.2f}% to {ret_high*100:.2f}% "
-                        f"(Horizon: {horizon_days} trading days)"
-                    )
+                        st.metric("Predicted Return", f"{ret*100:.2f}%")
+                        st.write(
+                            f"Confidence Range: {ret_low*100:.2f}% to {ret_high*100:.2f}% "
+                            f"(Horizon: {horizon_days} trading days)"
+                        )
 
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Trend", str(analysis.get("Trend", "N/A")))
-                    c2.metric("Volatility", str(analysis.get("Volatility", "N/A")))
-                    c3.metric("Confidence", str(analysis.get("Confidence_Score", "N/A")))
-                    st.info(f"Recommendation: **{analysis.get('Recommendation', 'N/A')}**")
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Trend", str(analysis.get("Trend", "N/A")))
+                        c2.metric("Volatility", str(analysis.get("Volatility", "N/A")))
+                        c3.metric("Confidence", str(analysis.get("Confidence_Score", "N/A")))
+                        st.info(f"Recommendation: **{analysis.get('Recommendation', 'N/A')}**")
 
-                    fig_ai = go.Figure()
-                    fig_ai.add_trace(go.Scatter(
-                        x=ai_df.index, y=ai_df["Predicted_Price"], name="AI Prediction",
-                        line=dict(color="purple")
-                    ))
-                    fig_ai.add_trace(go.Scatter(
-                        x=ai_df.index, y=ai_df["Upper_Bound"],
-                        fill=None, mode="lines", line_color="rgba(0,0,0,0)", showlegend=False
-                    ))
-                    fig_ai.add_trace(go.Scatter(
-                        x=ai_df.index, y=ai_df["Lower_Bound"],
-                        fill="tonexty", mode="lines", line_color="rgba(0,0,0,0)",
-                        name="Confidence Interval", fillcolor="rgba(128, 0, 128, 0.2)"
-                    ))
-                    st.plotly_chart(fig_ai, use_container_width=True)
-                else:
-                    st.error("Could not fetch current price for return calculation.")
-            except Exception as e:
-                st.error(f"Prediction error: {e}")
+                        fig_ai = go.Figure()
+                        fig_ai.add_trace(go.Scatter(
+                            x=ai_df.index, y=ai_df["Predicted_Price"], name="AI Prediction",
+                            line=dict(color="purple")
+                        ))
+                        fig_ai.add_trace(go.Scatter(
+                            x=ai_df.index, y=ai_df["Upper_Bound"],
+                            fill=None, mode="lines", line_color="rgba(0,0,0,0)", showlegend=False
+                        ))
+                        fig_ai.add_trace(go.Scatter(
+                            x=ai_df.index, y=ai_df["Lower_Bound"],
+                            fill="tonexty", mode="lines", line_color="rgba(0,0,0,0)",
+                            name="Confidence Interval", fillcolor="rgba(128, 0, 128, 0.2)"
+                        ))
+                        st.plotly_chart(fig_ai, use_container_width=True)
+                    else:
+                        st.error("Could not fetch current price for return calculation.")
+                except Exception as e:
+                    st.error(f"Prediction error: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 2: Auto Value Picks + Portfolio Builder
+# TAB 2: Auto Value Picks + Portfolio Builder (persist results)
 # ─────────────────────────────────────────────────────────────────────────────
 with tabs[1]:
     st.subheader("✨ Auto Value Picks (Lynch → Graham → MOS) + Portfolio Builder")
     st.caption("Growth (g) is strictly 5Y CAGR: Profit CAGR preferred, Sales CAGR fallback. No quarterly growth.")
 
+    # ---- persist scan outputs across reruns ----
+    if "value_scan_df" not in st.session_state:
+        st.session_state.value_scan_df = None
+    if "value_scan_shortlist" not in st.session_state:
+        st.session_state.value_scan_shortlist = None
+    if "value_scan_params" not in st.session_state:
+        st.session_state.value_scan_params = {}
+
     # Screening inputs
     cA, cB, cC, cD = st.columns([1.0, 1.0, 1.0, 1.0])
     with cA:
-        peg_limit = st.number_input("Lynch PEG limit", min_value=0.1, max_value=5.0, value=1.0, step=0.1, key="v_peg")
+        peg_limit = st.number_input("Lynch PEG limit", 0.1, 5.0, 1.0, 0.1, key="v_peg")
     with cB:
-        mos_pct = st.number_input("Margin of Safety (%)", min_value=0, max_value=80, value=30, step=1, key="v_mos")
+        mos_pct = st.number_input("Margin of Safety (%)", 0, 80, 30, 1, key="v_mos")
     with cC:
         bond_yield = st.number_input(
             "Bond yield used in Graham formula (%)",
-            min_value=0.5, max_value=20.0, value=8.0, step=0.1, key="v_yield",
+            0.5, 20.0, 8.0, 0.1, key="v_yield",
             help="Set an India-appropriate corporate/AAA yield you trust."
         )
     with cD:
         default_growth = st.number_input(
             "Default growth% (fallback if 5Y CAGR missing)",
-            min_value=0.0, max_value=30.0, value=12.0, step=0.5, key="v_defg"
+            0.0, 30.0, 12.0, 0.5, key="v_defg"
         )
 
-    # Universe controls
     c1, c2 = st.columns([1, 1])
     with c1:
         universe_size = st.slider("Universe size (Top by market cap)", 100, 700, 300, 50, key="v_univ")
     with c2:
         top_n = st.slider("Show top N picks", 10, 100, 30, 5, key="v_topn")
 
-    # Build NSE universe tickers
+    # Clear button
+    if st.button("🧹 Clear Screening Results", key="clear_value"):
+        st.session_state.value_scan_df = None
+        st.session_state.value_scan_shortlist = None
+        st.session_state.value_scan_params = {}
+        st.rerun()
+
     stock_map = load_nse_stock_list()
     all_tickers = list(stock_map.values())
 
@@ -460,7 +476,9 @@ with tabs[1]:
         st.error("Could not load NSE equity list right now.")
         st.stop()
 
-    if st.button("Run Auto Screening", type="primary", key="run_value_screen"):
+    run_clicked = st.button("Run Auto Screening", type="primary", key="run_value_screen")
+
+    if run_clicked:
         max_workers = 24
 
         # Step 1: Top by market cap
@@ -500,199 +518,209 @@ with tabs[1]:
 
             df = pd.DataFrame(rows)
 
-        # Shortlist
         shortlist = df[
             (df["Lynch Screen"] == "PASS") &
             (df["Verdict"] == "Undervalued ✅")
         ].copy().sort_values("MOS Gap % (MOS - Price)", ascending=False)
 
-        st.success("Auto screening complete ✅")
+        # ✅ Persist results
+        st.session_state.value_scan_df = df
+        st.session_state.value_scan_shortlist = shortlist
+        st.session_state.value_scan_params = {
+            "mos_pct": mos_pct,
+            "peg_limit": peg_limit,
+            "bond_yield": bond_yield,
+            "default_growth": default_growth,
+            "universe_size": universe_size,
+        }
 
-        st.markdown("### ✅ Shortlist (Lynch PASS + Undervalued with MOS)")
-        if shortlist.empty:
-            st.info("No stocks met both conditions with current inputs. Try adjusting PEG limit/MOS/bond yield.")
-            st.dataframe(df.sort_values("Mkt Cap", ascending=False), use_container_width=True)
-            st.stop()
+        st.success("Auto screening complete ✅ (results are saved while you tweak inputs)")
 
+    # Always display stored results if available
+    df = st.session_state.value_scan_df
+    shortlist = st.session_state.value_scan_shortlist
+
+    if df is None:
+        st.info("Click **Run Auto Screening** to generate value picks.")
+        st.stop()
+
+    stored_mos = st.session_state.value_scan_params.get("mos_pct", mos_pct)
+    mos_col = f"MOS Price ({stored_mos}%)"
+
+    st.markdown("### ✅ Shortlist (Lynch PASS + Undervalued with MOS)")
+    if shortlist is None or shortlist.empty:
+        st.info("No stocks met both conditions with the last run. Try adjusting PEG/MOS/yield and run again.")
+    else:
         st.dataframe(
             shortlist.head(top_n)[[
                 "Ticker", "Current Price", "P/E", "Growth % (g)", "PEG",
-                "Graham Intrinsic", f"MOS Price ({mos_pct}%)", "MOS Gap % (MOS - Price)",
+                "Graham Intrinsic", mos_col, "MOS Gap % (MOS - Price)",
                 "Growth Source"
             ]],
             use_container_width=True
         )
 
-        st.markdown("### 📄 Full scan results (sorted by market cap)")
-        st.dataframe(df.sort_values("Mkt Cap", ascending=False), use_container_width=True)
+    st.markdown("### 📄 Full scan results (sorted by market cap)")
+    st.dataframe(df.sort_values("Mkt Cap", ascending=False), use_container_width=True)
 
-        # ============================
-        # Step 3/3: Portfolio Builder (Correlation → Least correlated basket → Target-to-MOS → Monte Carlo)
-        # ============================
-        st.markdown("---")
-        st.subheader("📦 Build a Diversified MOS Portfolio (Least Correlated + Monte Carlo)")
-        st.caption("We compute a correlation heatmap of shortlisted stocks, pick least-correlated basket, then estimate portfolio value if prices reach MOS.")
+    # If no shortlist -> stop before portfolio builder
+    if shortlist is None or shortlist.empty:
+        st.stop()
 
-        # Inputs
-        pA, pB, pC, pD = st.columns([1, 1, 1, 1])
-        with pA:
-            invest_amount = st.number_input("Investment Amount (₹)", min_value=1000, value=100000, step=1000, key="pb_amt")
-        with pB:
-            corr_lookback = st.selectbox("Correlation Lookback", ["6mo", "1y", "2y"], index=1, key="pb_lb")
-        with pC:
-            pick_n = st.slider("Least-correlated stocks to pick", min_value=3, max_value=15, value=6, step=1, key="pb_n")
-        with pD:
-            rf_rate = st.number_input("Risk-free rate (annual, %)", min_value=0.0, max_value=20.0, value=0.0, step=0.25, key="pb_rf")
+    # ============================
+    # Portfolio Builder
+    # ============================
+    st.markdown("---")
+    st.subheader("📦 Build a Diversified MOS Portfolio (Least Correlated + Monte Carlo)")
+    st.caption("Correlation heatmap on shortlist → pick least-correlated basket → target portfolio value if all reach MOS → optimize weights via Monte Carlo.")
 
-        mos_col = f"MOS Price ({mos_pct}%)"
+    # Inputs (these can be changed without rerunning screening)
+    pA, pB, pC, pD = st.columns([1, 1, 1, 1])
+    with pA:
+        invest_amount = st.number_input("Investment Amount (₹)", min_value=1000, value=100000, step=1000, key="pb_amt")
+    with pB:
+        corr_lookback = st.selectbox("Correlation Lookback", ["6mo", "1y", "2y"], index=1, key="pb_lb")
+    with pC:
+        pick_n = st.slider("Least-correlated stocks to pick", min_value=3, max_value=15, value=6, step=1, key="pb_n")
+    with pD:
+        rf_rate = st.number_input("Risk-free rate (annual, %)", min_value=0.0, max_value=20.0, value=0.0, step=0.25, key="pb_rf")
 
-        # Candidates must have valid MOS + price
-        candidates = shortlist[["Ticker", "Current Price", mos_col]].dropna()
-        candidates = candidates[(candidates["Current Price"] > 0) & (candidates[mos_col] > 0)]
+    candidates = shortlist[["Ticker", "Current Price", mos_col]].dropna()
+    candidates = candidates[(candidates["Current Price"] > 0) & (candidates[mos_col] > 0)]
 
-        if len(candidates) < 3:
-            st.warning("Need at least 3 valid shortlisted stocks (with Current Price and MOS Price) to build portfolio.")
-            st.stop()
+    if len(candidates) < 3:
+        st.warning("Need at least 3 valid shortlisted stocks (with Current Price and MOS Price) to build portfolio.")
+        st.stop()
 
-        cand_tickers = candidates["Ticker"].tolist()
-        prices_corr = load_prices_for_corr(cand_tickers, corr_lookback)
+    cand_tickers = candidates["Ticker"].tolist()
+    prices_corr = load_prices_for_corr(cand_tickers, corr_lookback)
 
-        if prices_corr.empty or prices_corr.shape[1] < 3:
-            st.error("Not enough price history to compute correlations. Try a longer lookback (1y/2y).")
-            st.stop()
+    if prices_corr.empty or prices_corr.shape[1] < 3:
+        st.error("Not enough price history to compute correlations. Try a longer lookback (1y/2y).")
+        st.stop()
 
-        rets = prices_corr.pct_change().dropna()
-        corr = rets.corr()
+    rets = prices_corr.pct_change().dropna()
+    corr = rets.corr()
 
-        # Heatmap (like home)
-        st.markdown("### 🔥 Correlation Heatmap (Shortlisted Stocks)")
-        fig_hm = plt.figure(figsize=(12, 8))
-        sns.heatmap(corr, annot=False, cmap="RdYlGn", center=0)
-        st.pyplot(fig_hm)
-        plt.close()
+    st.markdown("### 🔥 Correlation Heatmap (Shortlisted Stocks)")
+    fig_hm = plt.figure(figsize=(12, 8))
+    sns.heatmap(corr, annot=False, cmap="RdYlGn", center=0)
+    st.pyplot(fig_hm)
+    plt.close()
 
-        # Choose least-correlated basket
-        selected_tickers = pick_least_correlated(corr, int(pick_n))
+    selected_tickers = pick_least_correlated(corr, int(pick_n))
 
-        st.markdown("### ✅ Selected Least-Correlated Basket")
-        st.write(", ".join(selected_tickers))
+    st.markdown("### ✅ Selected Least-Correlated Basket")
+    st.write(", ".join(selected_tickers))
 
-        basket = candidates[candidates["Ticker"].isin(selected_tickers)].copy().set_index("Ticker")
-        basket = basket.loc[selected_tickers]  # keep order
+    basket = candidates[candidates["Ticker"].isin(selected_tickers)].copy().set_index("Ticker")
+    basket = basket.loc[selected_tickers]
 
-        # Target returns if reach MOS
-        basket["Target Return to MOS (%)"] = ((basket[mos_col] / basket["Current Price"]) - 1) * 100
+    basket["Target Return to MOS (%)"] = ((basket[mos_col] / basket["Current Price"]) - 1) * 100
 
-        st.markdown("### 🎯 Upside if Each Stock Reaches its MOS Price")
-        st.dataframe(basket[["Current Price", mos_col, "Target Return to MOS (%)"]], use_container_width=True)
+    st.markdown("### 🎯 Upside if Each Stock Reaches its MOS Price")
+    st.dataframe(basket[["Current Price", mos_col, "Target Return to MOS (%)"]], use_container_width=True)
 
-        # Covariance for risk
-        rets_sel = rets[selected_tickers].dropna()
-        if rets_sel.empty:
-            st.error("No aligned return data for selected tickers. Try increasing lookback.")
-            st.stop()
+    rets_sel = rets[selected_tickers].dropna()
+    if rets_sel.empty:
+        st.error("No aligned return data for selected tickers. Try increasing lookback.")
+        st.stop()
 
-        cov_daily = rets_sel.cov().values
+    cov_daily = rets_sel.cov().values
 
-        # Target multiplier and upside vector
-        target_multiplier = (basket[mos_col].values / basket["Current Price"].values)
-        exp_upside = basket["Target Return to MOS (%)"].values / 100.0  # fraction
+    target_multiplier = (basket[mos_col].values / basket["Current Price"].values)
+    exp_upside = basket["Target Return to MOS (%)"].values / 100.0
 
-        # Example random allocation
-        st.markdown("### 💰 Example Allocation (Random Weights) + Target Portfolio Value at MOS")
-        rand_w = np.random.random(len(selected_tickers))
-        rand_w = rand_w / rand_w.sum()
-        alloc_amounts = invest_amount * rand_w
+    # Example random allocation
+    st.markdown("### 💰 Example Allocation (Random Weights) + Target Portfolio Value at MOS")
+    rand_w = np.random.random(len(selected_tickers))
+    rand_w = rand_w / rand_w.sum()
+    alloc_amounts = invest_amount * rand_w
 
-        target_value = float(np.sum(alloc_amounts * target_multiplier))
-        target_gain = (target_value / invest_amount - 1) * 100
+    target_value = float(np.sum(alloc_amounts * target_multiplier))
+    target_gain = (target_value / invest_amount - 1) * 100
 
-        alloc_df = pd.DataFrame({
-            "Ticker": selected_tickers,
-            "Weight": rand_w,
-            "Allocation (₹)": alloc_amounts,
-            "Current Price": basket["Current Price"].values,
-            "MOS Price": basket[mos_col].values,
-            "Target Multiplier (MOS/Price)": target_multiplier
-        })
-        st.dataframe(alloc_df, use_container_width=True)
-        st.metric("Target Portfolio Value if All Reach MOS", f"₹{target_value:,.0f}", f"{target_gain:.2f}%")
+    alloc_df = pd.DataFrame({
+        "Ticker": selected_tickers,
+        "Weight": rand_w,
+        "Allocation (₹)": alloc_amounts,
+        "Current Price": basket["Current Price"].values,
+        "MOS Price": basket[mos_col].values,
+        "Target Multiplier (MOS/Price)": target_multiplier
+    })
+    st.dataframe(alloc_df, use_container_width=True)
+    st.metric("Target Portfolio Value if All Reach MOS", f"₹{target_value:,.0f}", f"{target_gain:.2f}%")
 
-        # Monte Carlo optimizer
-        st.markdown("### 🎯 Monte Carlo Optimization (Max Sharpe-like using MOS Upside)")
-        m1, m2, m3 = st.columns([1, 1, 1])
-        with m1:
-            mc_sims = st.number_input("Simulations", min_value=500, max_value=50000, value=8000, step=500, key="pb_sims")
-        with m2:
-            annualize_vol = st.checkbox("Annualize volatility (×√252)", value=True, key="pb_ann")
-        with m3:
-            show_top = st.number_input("Show top portfolios", min_value=5, max_value=50, value=10, step=1, key="pb_top")
+    # Monte Carlo optimizer
+    st.markdown("### 🎯 Monte Carlo Optimization (Max Sharpe-like using MOS Upside)")
+    m1, m2, m3 = st.columns([1, 1, 1])
+    with m1:
+        mc_sims = st.number_input("Simulations", min_value=500, max_value=50000, value=8000, step=500, key="pb_sims")
+    with m2:
+        annualize_vol = st.checkbox("Annualize volatility (×√252)", value=True, key="pb_ann")
+    with m3:
+        show_top = st.number_input("Show top portfolios", min_value=5, max_value=50, value=10, step=1, key="pb_top")
 
-        rf = (rf_rate / 100.0)
-        vol_scale = np.sqrt(252) if annualize_vol else 1.0
+    rf = (rf_rate / 100.0)
+    vol_scale = np.sqrt(252) if annualize_vol else 1.0
 
-        results = []
-        weight_store = []
+    results = []
+    weight_store = []
 
-        for _ in range(int(mc_sims)):
-            w = np.random.random(len(selected_tickers))
-            w = w / w.sum()
-            weight_store.append(w)
+    for _ in range(int(mc_sims)):
+        w = np.random.random(len(selected_tickers))
+        w = w / w.sum()
+        weight_store.append(w)
 
-            # "Return" proxy: weighted MOS-upside (one-time)
-            port_ret = float(np.dot(w, exp_upside))
+        port_ret = float(np.dot(w, exp_upside))
+        port_vol = float(np.sqrt(np.dot(w.T, np.dot(cov_daily, w)))) * vol_scale
+        sharpe_like = (port_ret - rf) / port_vol if port_vol > 0 else np.nan
 
-            # Risk from historical covariance
-            port_vol = float(np.sqrt(np.dot(w.T, np.dot(cov_daily, w)))) * vol_scale
+        results.append([port_ret, port_vol, sharpe_like])
 
-            # Sharpe-like
-            sharpe_like = (port_ret - rf) / port_vol if port_vol > 0 else np.nan
-            results.append([port_ret, port_vol, sharpe_like])
+    sim_df = pd.DataFrame(results, columns=["MOS_Upside_Return", "Volatility", "Sharpe_Like"])
+    sim_df = sim_df.replace([np.inf, -np.inf], np.nan).dropna()
 
-        sim_df = pd.DataFrame(results, columns=["MOS_Upside_Return", "Volatility", "Sharpe_Like"])
-        sim_df = sim_df.replace([np.inf, -np.inf], np.nan).dropna()
+    if sim_df.empty:
+        st.error("Monte Carlo produced no valid portfolios. Try a different basket/lookback.")
+        st.stop()
 
-        if sim_df.empty:
-            st.error("Monte Carlo produced no valid portfolios. Try a different basket/lookback.")
-            st.stop()
+    best_idx = sim_df["Sharpe_Like"].idxmax()
+    best_w = weight_store[int(best_idx)]
 
-        best_idx = sim_df["Sharpe_Like"].idxmax()
-        best_w = weight_store[int(best_idx)]
+    best_alloc = pd.DataFrame({
+        "Ticker": selected_tickers,
+        "Weight": best_w,
+        "Allocation (₹)": invest_amount * best_w
+    }).sort_values("Weight", ascending=False)
 
-        best_alloc = pd.DataFrame({
-            "Ticker": selected_tickers,
-            "Weight": best_w,
-            "Allocation (₹)": invest_amount * best_w
-        }).sort_values("Weight", ascending=False)
+    st.markdown("#### ✅ Best Portfolio (Max Sharpe-like)")
+    st.dataframe(best_alloc, use_container_width=True)
 
-        st.markdown("#### ✅ Best Portfolio (Max Sharpe-like)")
-        st.dataframe(best_alloc, use_container_width=True)
+    best_target_value = float(np.sum((invest_amount * best_w) * target_multiplier))
+    best_gain = (best_target_value / invest_amount - 1) * 100
+    st.metric("Best Target Portfolio Value at MOS", f"₹{best_target_value:,.0f}", f"{best_gain:.2f}%")
+    st.caption("Sharpe-like uses MOS-upside as return proxy and historical covariance as risk proxy.")
 
-        best_target_value = float(np.sum((invest_amount * best_w) * target_multiplier))
-        best_gain = (best_target_value / invest_amount - 1) * 100
-        st.metric("Best Target Portfolio Value at MOS", f"₹{best_target_value:,.0f}", f"{best_gain:.2f}%")
-        st.caption("Sharpe-like uses MOS-upside as return proxy and historical covariance as risk proxy.")
+    fig_mc = px.scatter(
+        sim_df,
+        x="Volatility",
+        y="MOS_Upside_Return",
+        color="Sharpe_Like",
+        hover_data=["Sharpe_Like"]
+    )
+    fig_mc.add_trace(go.Scatter(
+        x=[sim_df.loc[best_idx, "Volatility"]],
+        y=[sim_df.loc[best_idx, "MOS_Upside_Return"]],
+        mode="markers",
+        name="Best (Max Sharpe-like)",
+        marker=dict(size=18, color="red")
+    ))
+    fig_mc.update_layout({"plot_bgcolor": "white"})
+    st.plotly_chart(fig_mc, use_container_width=True)
 
-        # Scatter plot
-        fig_mc = px.scatter(
-            sim_df,
-            x="Volatility",
-            y="MOS_Upside_Return",
-            color="Sharpe_Like",
-            hover_data=["Sharpe_Like"]
-        )
-        fig_mc.add_trace(go.Scatter(
-            x=[sim_df.loc[best_idx, "Volatility"]],
-            y=[sim_df.loc[best_idx, "MOS_Upside_Return"]],
-            mode="markers",
-            name="Best (Max Sharpe-like)",
-            marker=dict(size=18, color="red")
-        ))
-        fig_mc.update_layout({"plot_bgcolor": "white"})
-        st.plotly_chart(fig_mc, use_container_width=True)
-
-        st.markdown(f"### Top {int(show_top)} Portfolios")
-        st.dataframe(sim_df.sort_values("Sharpe_Like", ascending=False).head(int(show_top)), use_container_width=True)
+    st.markdown(f"### Top {int(show_top)} Portfolios")
+    st.dataframe(sim_df.sort_values("Sharpe_Like", ascending=False).head(int(show_top)), use_container_width=True)
 
 # Navigation
 st.markdown("---")
