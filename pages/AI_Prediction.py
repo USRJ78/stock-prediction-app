@@ -1,8 +1,9 @@
 # pages/AI_Prediction.py
 # ✅ FULL UPDATED FILE (paste & replace)
-# ✅ FIX 1: NSE list robust (LIVE NSE -> fallback ../data/EQUITY_L.csv) so no "Could not load NSE equity list"
-# ✅ FIX 2: Value Picks results persist after reruns (amount sliders etc won't reset)
-# ✅ Keeps your Lynch → Graham → MOS (5Y CAGR only) + correlation + least-correlated basket + Monte Carlo
+# ✅ NSE list robust (LIVE NSE -> fallback ../data/EQUITY_L.csv)
+# ✅ Value Picks results persist after reruns (amount sliders etc won't reset)
+# ✅ Auto Value Picks supports: Peter Lynch / Benjamin Graham / EPS×Multiple / Any combo / All
+# ✅ Portfolio Builder target can use Graham MOS OR EPS×M MOS
 
 import streamlit as st
 import yfinance as yf
@@ -19,7 +20,6 @@ import seaborn as sns
 from utils import advanced_ai_prediction
 from auth_store import load_premium_users
 
-# ✅ added for robust NSE loading
 import requests
 from io import StringIO
 from pathlib import Path
@@ -45,7 +45,7 @@ if "screen_inputs" not in st.session_state:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NSE list + resolver helpers (same idea as your Home)
+# NSE list + resolver helpers
 # ─────────────────────────────────────────────────────────────────────────────
 ETF_MAP = {
     "NIFTY 50 ETF": "NIFTYBEES.NS",
@@ -207,7 +207,7 @@ def get_growth_5y_cagr(ticker: str, default_growth: float):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fundamentals + Lynch + Graham
+# Fundamentals + Lynch + Graham + EPS×Multiple (separate)
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fundamentals(ticker: str) -> dict:
@@ -259,6 +259,7 @@ def peter_lynch_screen(pe, growth_pct, peg_limit):
 
 def graham_intrinsic_value(eps, growth_pct, bond_yield_pct):
     """
+    Classic Graham (approx):
     Intrinsic = EPS * (8.5 + 2g) * (4.4 / Y)
     g and Y are in percent.
     """
@@ -274,7 +275,25 @@ def graham_intrinsic_value(eps, growth_pct, bond_yield_pct):
     intrinsic = eps * (8.5 + 2 * g) * (4.4 / Y)
     return intrinsic, f"Used g={g:.2f}% (capped 0–25), Y={Y:.2f}%"
 
-def compute_value_row(tk: str, peg_limit: float, mos_pct: float, bond_yield: float, default_growth: float) -> dict:
+def eps_multiple_target(eps: float, multiple: float):
+    """
+    Simple target price:
+      Target = EPS * multiple
+    """
+    if not np.isfinite(eps) or eps <= 0:
+        return np.nan, "EPS not available or ≤ 0"
+    if not np.isfinite(multiple) or multiple <= 0:
+        return np.nan, "Multiple not valid"
+    return float(eps) * float(multiple), f"Used EPS×M where M={float(multiple):.0f}"
+
+def compute_value_row(
+    tk: str,
+    peg_limit: float,
+    mos_pct: float,
+    bond_yield: float,
+    default_growth: float,
+    eps_mult: float
+) -> dict:
     f = fetch_fundamentals(tk)
     price = f["price"]
     eps = f["eps"]
@@ -283,19 +302,32 @@ def compute_value_row(tk: str, peg_limit: float, mos_pct: float, bond_yield: flo
 
     growth_pct, growth_src = get_growth_5y_cagr(tk, default_growth)
 
+    # Lynch (PEG)
     lynch_pass, peg, lynch_reasons = peter_lynch_screen(pe, growth_pct, peg_limit)
+
+    # Graham intrinsic
     intrinsic, graham_note = graham_intrinsic_value(eps, growth_pct, bond_yield)
 
     mos_price = np.nan
     verdict = "N/A"
     mos_gap_pct = np.nan
-
     if np.isfinite(intrinsic):
         mos_price = intrinsic * (1 - mos_pct / 100.0)
-
     if np.isfinite(price) and np.isfinite(mos_price) and mos_price > 0:
         mos_gap_pct = (mos_price - price) / price * 100.0
         verdict = "Undervalued ✅" if price < mos_price else "Overvalued / No MOS ❌"
+
+    # EPS×Multiple (separate)
+    eps_target, eps_note = eps_multiple_target(eps, eps_mult)
+
+    eps_mos_price = np.nan
+    eps_verdict = "N/A"
+    eps_gap_pct = np.nan
+    if np.isfinite(eps_target):
+        eps_mos_price = eps_target * (1 - mos_pct / 100.0)
+    if np.isfinite(price) and np.isfinite(eps_mos_price) and eps_mos_price > 0:
+        eps_gap_pct = (eps_mos_price - price) / price * 100.0
+        eps_verdict = "Undervalued ✅" if price < eps_mos_price else "Overvalued / No MOS ❌"
 
     return {
         "Ticker": tk,
@@ -305,14 +337,25 @@ def compute_value_row(tk: str, peg_limit: float, mos_pct: float, bond_yield: flo
         "EPS (TTM)": eps,
         "Growth % (g)": growth_pct,
         "Growth Source": growth_src,
+
+        # Lynch
         "PEG": peg,
         "Lynch Screen": "PASS" if lynch_pass else "FAIL",
         "Lynch Reasons": "; ".join(lynch_reasons) if lynch_reasons else "",
+
+        # Graham
         "Graham Intrinsic": intrinsic,
         f"MOS Price ({mos_pct}%)": mos_price,
         "Verdict": verdict,
         "MOS Gap % (MOS - Price)": mos_gap_pct,
         "Graham Note": graham_note,
+
+        # EPS×Multiple
+        "EPS Target (EPS×M)": eps_target,
+        f"EPS×M MOS Price ({mos_pct}%)": eps_mos_price,
+        "EPS×M Verdict": eps_verdict,
+        "EPS×M Gap % (MOS - Price)": eps_gap_pct,
+        "EPS×M Note": eps_note,
     }
 
 
@@ -341,7 +384,6 @@ def pick_least_correlated(corr_df: pd.DataFrame, n: int):
     corr_vals = corr_df.copy()
     np.fill_diagonal(corr_vals.values, np.nan)
 
-    # start pair
     i, j = np.unravel_index(np.nanargmin(corr_vals.values), corr_vals.shape)
     chosen = [tickers[i], tickers[j]]
 
@@ -372,7 +414,7 @@ premium_users = load_premium_users()
 if not email or email.lower().strip() not in premium_users:
     st.error("Premium access required for this page. Please return to the main page and subscribe/verify.")
     if st.button("← Back to Portfolio"):
-        st.switch_page("Home.py")  # adjust if your main filename is different
+        st.switch_page("Home.py")
     st.stop()
 
 st.session_state["premium_email"] = email.lower().strip()
@@ -473,11 +515,11 @@ with tabs[0]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 2: Auto Value Picks + Portfolio Builder (FIXED persistence)
+# TAB 2: Auto Value Picks + Portfolio Builder
 # ─────────────────────────────────────────────────────────────────────────────
 with tabs[1]:
-    st.subheader("✨ Auto Value Picks (Lynch → Graham → MOS) + Portfolio Builder")
-    st.caption("Growth (g) is strictly 5Y CAGR: Profit CAGR preferred, Sales CAGR fallback. No quarterly growth.")
+    st.subheader("✨ Auto Value Picks + Portfolio Builder")
+    st.caption("Growth (g) uses 5Y CAGR: Profit preferred, Sales fallback. Valuation can use Lynch, Graham, EPS×M, or combos.")
 
     # Screening inputs
     cA, cB, cC, cD = st.columns([1.0, 1.0, 1.0, 1.0])
@@ -488,8 +530,7 @@ with tabs[1]:
     with cC:
         bond_yield = st.number_input(
             "Bond yield used in Graham formula (%)",
-            min_value=0.5, max_value=20.0, value=8.0, step=0.1, key="v_yield",
-            help="Set an India-appropriate corporate/AAA yield you trust."
+            min_value=0.5, max_value=20.0, value=8.0, step=0.1, key="v_yield"
         )
     with cD:
         default_growth = st.number_input(
@@ -497,39 +538,69 @@ with tabs[1]:
             min_value=0.0, max_value=30.0, value=12.0, step=0.5, key="v_defg"
         )
 
+    methods = st.multiselect(
+        "Select valuation / screening methods",
+        ["Peter Lynch (PEG)", "Benjamin Graham (Intrinsic)", "EPS Multiple (EPS×M)"],
+        default=["Peter Lynch (PEG)", "Benjamin Graham (Intrinsic)"],
+        key="v_methods"
+    )
+
+    eps_mult = st.slider(
+        "EPS Multiple (M) for EPS×M method",
+        min_value=1,
+        max_value=30,
+        value=15,
+        step=1,
+        key="v_eps_mult",
+        help="Target price = EPS × M. MOS is applied to this target to decide undervalued/overvalued."
+    )
+
     # Universe controls
-    c1, c2 = st.columns([1, 1])
-    with c1:
+    u1, u2 = st.columns([1, 1])
+    with u1:
         universe_size = st.slider("Universe size (Top by market cap)", 100, 700, 300, 50, key="v_univ")
-    with c2:
+    with u2:
         top_n = st.slider("Show top N picks", 10, 100, 30, 5, key="v_topn")
 
-    # Build NSE universe tickers (robust)
+    # Optional Market cap filter (₹ Crore)
+    mc1, mc2 = st.columns([1, 1])
+    with mc1:
+        min_mcap_cr = st.number_input("Min Market Cap (₹ Crore)", min_value=0, value=0, step=100, key="v_min_mcap_cr")
+    with mc2:
+        max_mcap_cr = st.number_input("Max Market Cap (₹ Crore)", min_value=0, value=0, step=100, key="v_max_mcap_cr",
+                                      help="0 = no upper limit")
+
+    min_mcap = float(min_mcap_cr) * 1e7
+    max_mcap = float(max_mcap_cr) * 1e7 if float(max_mcap_cr) > 0 else np.inf
+
+    # Build NSE universe tickers
     stock_map = load_nse_stock_list()
     all_tickers = list(stock_map.values())
 
     if not all_tickers:
         st.error(
             "Could not load NSE equity list.\n\n"
-            "✅ Ensure `data/EQUITY_L.csv` exists in your repo root (same level as Home.py)\n"
-            "✅ Then Streamlit Cloud → Manage app → Clear cache → Restart"
+            "✅ Ensure `data/EQUITY_L.csv` exists in your repo root\n"
+            "✅ Streamlit Cloud → Manage app → Clear cache → Restart"
         )
         st.stop()
 
-    # Button click (runs once, results persist)
     run_clicked = st.button("Run Auto Screening", type="primary", key="run_value_screen")
 
     if run_clicked:
         max_workers = 24
 
-        # Save inputs used for this run
         st.session_state.screen_inputs = dict(
             peg_limit=peg_limit,
             mos_pct=mos_pct,
             bond_yield=bond_yield,
             default_growth=default_growth,
             universe_size=universe_size,
-            top_n=top_n
+            top_n=top_n,
+            methods=methods,
+            eps_mult=eps_mult,
+            min_mcap_cr=min_mcap_cr,
+            max_mcap_cr=max_mcap_cr
         )
 
         # Step 1: Top by market cap
@@ -554,14 +625,21 @@ with tabs[1]:
                 st.stop()
 
             mcap_df = pd.DataFrame(mcap_rows, columns=["Ticker", "MktCap"]).sort_values("MktCap", ascending=False)
+
+            # Apply market cap filter
+            mcap_df = mcap_df[(mcap_df["MktCap"] >= min_mcap) & (mcap_df["MktCap"] <= max_mcap)]
+            if mcap_df.empty:
+                st.error("No stocks match the Market Cap filter. Reduce min cap / increase max cap.")
+                st.stop()
+
             universe = mcap_df["Ticker"].head(universe_size).tolist()
 
-        # Step 2: Lynch → Graham → MOS
-        with st.spinner("Step 2/3: Running Lynch → Graham → MOS (5Y CAGR)..."):
+        # Step 2: Run metrics for selected universe
+        with st.spinner("Step 2/3: Computing Lynch/Graham/EPS×M (with 5Y CAGR)..."):
             rows = []
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 futures2 = [
-                    ex.submit(compute_value_row, tk, peg_limit, mos_pct, bond_yield, default_growth)
+                    ex.submit(compute_value_row, tk, peg_limit, mos_pct, bond_yield, default_growth, eps_mult)
                     for tk in universe
                 ]
                 for fut in as_completed(futures2):
@@ -569,24 +647,39 @@ with tabs[1]:
 
             df = pd.DataFrame(rows)
 
-        shortlist = df[
-            (df["Lynch Screen"] == "PASS") &
-            (df["Verdict"] == "Undervalued ✅")
-        ].copy().sort_values("MOS Gap % (MOS - Price)", ascending=False)
+        # Step 3: Apply chosen filters (combo/all)
+        shortlist = df.copy()
 
-        # ✅ Persist results (this is the key fix)
+        if not methods:
+            shortlist = df.iloc[0:0].copy()
+        else:
+            if "Peter Lynch (PEG)" in methods:
+                shortlist = shortlist[shortlist["Lynch Screen"] == "PASS"]
+            if "Benjamin Graham (Intrinsic)" in methods:
+                shortlist = shortlist[shortlist["Verdict"] == "Undervalued ✅"]
+            if "EPS Multiple (EPS×M)" in methods:
+                shortlist = shortlist[shortlist["EPS×M Verdict"] == "Undervalued ✅"]
+
+        # Sort preference
+        if "Benjamin Graham (Intrinsic)" in methods and "MOS Gap % (MOS - Price)" in shortlist.columns:
+            shortlist = shortlist.sort_values("MOS Gap % (MOS - Price)", ascending=False)
+        elif "EPS Multiple (EPS×M)" in methods and "EPS×M Gap % (MOS - Price)" in shortlist.columns:
+            shortlist = shortlist.sort_values("EPS×M Gap % (MOS - Price)", ascending=False)
+        else:
+            shortlist = shortlist.sort_values("Mkt Cap", ascending=False)
+
+        # Persist results
         st.session_state.screen_df = df
         st.session_state.screen_shortlist = shortlist
         st.session_state.screen_done = True
 
-    # ✅ Render if already screened (so changing sliders/amount won't reset)
+    # Render results if already screened
     if st.session_state.screen_done:
         df = st.session_state.screen_df
         shortlist = st.session_state.screen_shortlist
 
         st.success("Auto screening complete ✅")
 
-        # Reset button
         colR1, colR2 = st.columns([1, 5])
         with colR1:
             if st.button("Reset screening"):
@@ -595,32 +688,52 @@ with tabs[1]:
                 st.session_state.screen_shortlist = None
                 st.rerun()
 
-        st.markdown("### ✅ Shortlist (Lynch PASS + Undervalued with MOS)")
         if shortlist is None or shortlist.empty:
-            st.info("No stocks met both conditions with current inputs. Try adjusting PEG limit/MOS/bond yield.")
+            st.info("No stocks matched your selected method(s) + filters. Try relaxing PEG/MOS/market-cap filters or selecting fewer methods.")
             if df is not None:
                 st.dataframe(df.sort_values("Mkt Cap", ascending=False), use_container_width=True)
             st.stop()
 
-        st.dataframe(
-            shortlist.head(top_n)[[
-                "Ticker", "Current Price", "P/E", "Growth % (g)", "PEG",
-                "Graham Intrinsic", f"MOS Price ({mos_pct}%)", "MOS Gap % (MOS - Price)",
-                "Growth Source"
-            ]],
-            use_container_width=True
-        )
+        # Show shortlist columns depending on methods
+        show_cols = ["Ticker", "Current Price", "Mkt Cap", "EPS (TTM)", "P/E", "Growth % (g)", "Growth Source"]
 
-        st.markdown("### 📄 Full scan results (sorted by market cap)")
+        if "Peter Lynch (PEG)" in methods:
+            show_cols += ["PEG", "Lynch Screen"]
+        if "Benjamin Graham (Intrinsic)" in methods:
+            show_cols += ["Graham Intrinsic", f"MOS Price ({mos_pct}%)", "Verdict", "MOS Gap % (MOS - Price)"]
+        if "EPS Multiple (EPS×M)" in methods:
+            show_cols += ["EPS Target (EPS×M)", f"EPS×M MOS Price ({mos_pct}%)", "EPS×M Verdict", "EPS×M Gap % (MOS - Price)"]
+
+        show_cols = [c for c in show_cols if c in shortlist.columns]
+
+        st.markdown("### ✅ Shortlist (based on selected method(s))")
+        st.dataframe(shortlist.head(top_n)[show_cols], use_container_width=True)
+
+        st.markdown("### 📄 Full scan results")
         st.dataframe(df.sort_values("Mkt Cap", ascending=False), use_container_width=True)
 
         # ============================
-        # Portfolio Builder (Correlation → Least correlated basket → Target-to-MOS → Monte Carlo)
+        # Portfolio Builder
         # ============================
         st.markdown("---")
-        st.subheader("📦 Build a Diversified MOS Portfolio (Least Correlated + Monte Carlo)")
-        st.caption("Correlation heatmap of shortlisted stocks, least-correlated basket, then estimate portfolio value if prices reach MOS.")
+        st.subheader("📦 Portfolio Builder (Least Correlated + Monte Carlo)")
+        st.caption("Pick least-correlated basket, then estimate target portfolio value if prices reach chosen MOS target.")
 
+        target_mode = st.selectbox(
+            "Portfolio target to use",
+            ["Graham MOS", "EPS×M MOS"],
+            index=0,
+            key="pb_target_mode"
+        )
+
+        if target_mode == "Graham MOS":
+            mos_col = f"MOS Price ({mos_pct}%)"
+            verdict_col = "Verdict"
+        else:
+            mos_col = f"EPS×M MOS Price ({mos_pct}%)"
+            verdict_col = "EPS×M Verdict"
+
+        # Inputs
         pA, pB, pC, pD = st.columns([1, 1, 1, 1])
         with pA:
             invest_amount = st.number_input("Investment Amount (₹)", min_value=1000, value=100000, step=1000, key="pb_amt")
@@ -631,13 +744,12 @@ with tabs[1]:
         with pD:
             rf_rate = st.number_input("Risk-free rate (annual, %)", min_value=0.0, max_value=20.0, value=0.0, step=0.25, key="pb_rf")
 
-        mos_col = f"MOS Price ({mos_pct}%)"
-
-        candidates = shortlist[["Ticker", "Current Price", mos_col]].dropna()
+        # Candidates from shortlist must have valid MOS target and price
+        candidates = shortlist[["Ticker", "Current Price", mos_col, verdict_col]].dropna()
         candidates = candidates[(candidates["Current Price"] > 0) & (candidates[mos_col] > 0)]
 
         if len(candidates) < 3:
-            st.warning("Need at least 3 valid shortlisted stocks (with Current Price and MOS Price) to build portfolio.")
+            st.warning("Need at least 3 stocks with valid target MOS price for the chosen target mode.")
             st.stop()
 
         cand_tickers = candidates["Ticker"].tolist()
@@ -650,24 +762,22 @@ with tabs[1]:
         rets = prices_corr.pct_change().dropna()
         corr = rets.corr()
 
-        st.markdown("### 🔥 Correlation Heatmap (Shortlisted Stocks)")
+        st.markdown("### 🔥 Correlation Heatmap (Candidates)")
         fig_hm = plt.figure(figsize=(12, 8))
         sns.heatmap(corr, annot=False, cmap="RdYlGn", center=0)
         st.pyplot(fig_hm)
         plt.close()
 
         selected_tickers = pick_least_correlated(corr, int(pick_n))
-
         st.markdown("### ✅ Selected Least-Correlated Basket")
         st.write(", ".join(selected_tickers))
 
         basket = candidates[candidates["Ticker"].isin(selected_tickers)].copy().set_index("Ticker")
         basket = basket.loc[selected_tickers]
 
-        basket["Target Return to MOS (%)"] = ((basket[mos_col] / basket["Current Price"]) - 1) * 100
-
-        st.markdown("### 🎯 Upside if Each Stock Reaches its MOS Price")
-        st.dataframe(basket[["Current Price", mos_col, "Target Return to MOS (%)"]], use_container_width=True)
+        basket["Target Return (%)"] = ((basket[mos_col] / basket["Current Price"]) - 1) * 100
+        st.markdown("### 🎯 Upside if Each Stock Reaches Target MOS Price")
+        st.dataframe(basket[["Current Price", mos_col, "Target Return (%)"]], use_container_width=True)
 
         rets_sel = rets[selected_tickers].dropna()
         if rets_sel.empty:
@@ -675,11 +785,10 @@ with tabs[1]:
             st.stop()
 
         cov_daily = rets_sel.cov().values
-
         target_multiplier = (basket[mos_col].values / basket["Current Price"].values)
-        exp_upside = basket["Target Return to MOS (%)"].values / 100.0
+        exp_upside = basket["Target Return (%)"].values / 100.0
 
-        st.markdown("### 💰 Example Allocation (Random Weights) + Target Portfolio Value at MOS")
+        st.markdown("### 💰 Example Allocation (Random Weights) + Target Portfolio Value")
         rand_w = np.random.random(len(selected_tickers))
         rand_w = rand_w / rand_w.sum()
         alloc_amounts = invest_amount * rand_w
@@ -692,13 +801,13 @@ with tabs[1]:
             "Weight": rand_w,
             "Allocation (₹)": alloc_amounts,
             "Current Price": basket["Current Price"].values,
-            "MOS Price": basket[mos_col].values,
-            "Target Multiplier (MOS/Price)": target_multiplier
+            "Target MOS Price": basket[mos_col].values,
+            "Target Multiplier": target_multiplier
         })
         st.dataframe(alloc_df, use_container_width=True)
-        st.metric("Target Portfolio Value if All Reach MOS", f"₹{target_value:,.0f}", f"{target_gain:.2f}%")
+        st.metric("Target Portfolio Value if All Reach Target", f"₹{target_value:,.0f}", f"{target_gain:.2f}%")
 
-        st.markdown("### 🎯 Monte Carlo Optimization (Max Sharpe-like using MOS Upside)")
+        st.markdown("### 🎯 Monte Carlo Optimization (Max Sharpe-like using Target Upside)")
         m1, m2, m3 = st.columns([1, 1, 1])
         with m1:
             mc_sims = st.number_input("Simulations", min_value=500, max_value=50000, value=8000, step=500, key="pb_sims")
@@ -723,7 +832,7 @@ with tabs[1]:
             sharpe_like = (port_ret - rf) / port_vol if port_vol > 0 else np.nan
             results.append([port_ret, port_vol, sharpe_like])
 
-        sim_df = pd.DataFrame(results, columns=["MOS_Upside_Return", "Volatility", "Sharpe_Like"])
+        sim_df = pd.DataFrame(results, columns=["Target_Upside_Return", "Volatility", "Sharpe_Like"])
         sim_df = sim_df.replace([np.inf, -np.inf], np.nan).dropna()
 
         if sim_df.empty:
@@ -744,19 +853,18 @@ with tabs[1]:
 
         best_target_value = float(np.sum((invest_amount * best_w) * target_multiplier))
         best_gain = (best_target_value / invest_amount - 1) * 100
-        st.metric("Best Target Portfolio Value at MOS", f"₹{best_target_value:,.0f}", f"{best_gain:.2f}%")
-        st.caption("Sharpe-like uses MOS-upside as return proxy and historical covariance as risk proxy.")
+        st.metric("Best Target Portfolio Value at Target", f"₹{best_target_value:,.0f}", f"{best_gain:.2f}%")
 
         fig_mc = px.scatter(
             sim_df,
             x="Volatility",
-            y="MOS_Upside_Return",
+            y="Target_Upside_Return",
             color="Sharpe_Like",
             hover_data=["Sharpe_Like"]
         )
         fig_mc.add_trace(go.Scatter(
             x=[sim_df.loc[best_idx, "Volatility"]],
-            y=[sim_df.loc[best_idx, "MOS_Upside_Return"]],
+            y=[sim_df.loc[best_idx, "Target_Upside_Return"]],
             mode="markers",
             name="Best (Max Sharpe-like)",
             marker=dict(size=18, color="red")
