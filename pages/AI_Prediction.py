@@ -1,9 +1,7 @@
 # pages/AI_Prediction.py
 # ✅ FULL UPDATED FILE (paste & replace)
-# ✅ NSE list robust (LIVE NSE -> fallback ../data/EQUITY_L.csv)
-# ✅ Value Picks results persist after reruns (amount sliders etc won't reset)
-# ✅ Auto Value Picks supports: Peter Lynch / Benjamin Graham / EPS×Multiple / Any combo / All
-# ✅ Portfolio Builder target can use Graham MOS OR EPS×M MOS
+# ✅ NEW: For Peter Lynch (PEG) you can choose growth proxy = 5Y CAGR OR ROE OR default growth
+# ✅ Keeps: Lynch / Graham / EPS×M / any combo + market-cap filter + persistent results + portfolio builder target choice
 
 import streamlit as st
 import yfinance as yf
@@ -32,7 +30,7 @@ st.set_page_config(page_title="AI Premium Prediction", layout="wide")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Persist screening results across reruns (FIX for "goes back to before screening")
+# Persist screening results across reruns
 # ─────────────────────────────────────────────────────────────────────────────
 if "screen_done" not in st.session_state:
     st.session_state.screen_done = False
@@ -88,7 +86,7 @@ def load_nse_stock_list():
 
     # 2) LOCAL fallback: repo_root/data/EQUITY_L.csv
     try:
-        base_dir = Path(__file__).resolve().parent        # .../pages
+        base_dir = Path(__file__).resolve().parent  # .../pages
         csv_path = base_dir.parent / "data" / "EQUITY_L.csv"
         df = pd.read_csv(csv_path)
         if isinstance(df, pd.DataFrame) and not df.empty:
@@ -140,7 +138,7 @@ def resolve_assets(user_inputs):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Growth: ONLY 5Y CAGR (Profit preferred, Sales fallback) — NO quarterly growth
+# Helpers: numbers
 # ─────────────────────────────────────────────────────────────────────────────
 def safe_float(x):
     try:
@@ -152,6 +150,10 @@ def safe_float(x):
     except Exception:
         return np.nan
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Growth: 5Y CAGR (for Graham) — No quarterly growth
+# ─────────────────────────────────────────────────────────────────────────────
 def compute_cagr_5y(series: pd.Series) -> float:
     """
     Strict 5Y CAGR (needs ~6 annual points).
@@ -161,7 +163,7 @@ def compute_cagr_5y(series: pd.Series) -> float:
     if len(series) < 6:
         return np.nan
 
-    latest = safe_float(series.iloc[0])   # yfinance usually newest -> oldest
+    latest = safe_float(series.iloc[0])  # yfinance usually newest -> oldest
     oldest = safe_float(series.iloc[-1])
     years = len(series) - 1
 
@@ -207,13 +209,15 @@ def get_growth_5y_cagr(ticker: str, default_growth: float):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fundamentals + Lynch + Graham + EPS×Multiple (separate)
+# Fundamentals + ROE + Lynch + Graham + EPS×Multiple
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fundamentals(ticker: str) -> dict:
     """
-    Fetch price, EPS, PE, market cap from Yahoo.
-    Growth is computed separately via get_growth_5y_cagr().
+    Fetch price, EPS, PE, market cap, ROE from Yahoo.
+    ROE tries:
+      1) info['returnOnEquity'] (usually as decimal, e.g., 0.18)
+      2) compute from (Net Income / Total Stockholder Equity) if available
     """
     t = yf.Ticker(ticker)
     try:
@@ -231,9 +235,53 @@ def fetch_fundamentals(ticker: str) -> dict:
     pe = safe_float(info.get("trailingPE"))
     mcap = safe_float(info.get("marketCap"))
 
-    return {"ticker": ticker, "price": price, "eps": eps, "pe": pe, "market_cap": mcap}
+    # ROE from info (decimal -> %)
+    roe = safe_float(info.get("returnOnEquity"))
+    if np.isfinite(roe):
+        # Many providers give ROE in decimal form (0.15 = 15%)
+        if roe <= 2:  # heuristic
+            roe = roe * 100.0
 
-def peter_lynch_screen(pe, growth_pct, peg_limit):
+    # fallback ROE from financial statements
+    if not np.isfinite(roe):
+        try:
+            fin = t.financials
+            bs = t.balance_sheet
+            if isinstance(fin, pd.DataFrame) and isinstance(bs, pd.DataFrame):
+                # newest column is often first
+                ni = np.nan
+                eq = np.nan
+
+                if "Net Income" in fin.index:
+                    ni = safe_float(fin.loc["Net Income"].iloc[0])
+
+                # Equity label differs sometimes; try common ones
+                for eq_key in ["Total Stockholder Equity", "Total Equity Gross Minority Interest", "Stockholders Equity"]:
+                    if eq_key in bs.index:
+                        eq = safe_float(bs.loc[eq_key].iloc[0])
+                        if np.isfinite(eq) and eq != 0:
+                            break
+
+                if np.isfinite(ni) and np.isfinite(eq) and eq != 0:
+                    roe = (ni / eq) * 100.0
+        except Exception:
+            pass
+
+    return {
+        "ticker": ticker,
+        "price": price,
+        "eps": eps,
+        "pe": pe,
+        "market_cap": mcap,
+        "roe_pct": roe
+    }
+
+def peter_lynch_screen(pe, growth_proxy_pct, peg_limit):
+    """
+    Lynch-style PEG screen:
+      PEG = PE / growth_proxy
+    growth_proxy can be 5Y CAGR OR ROE OR default growth (user choice).
+    """
     reasons = []
     passed = True
 
@@ -241,13 +289,13 @@ def peter_lynch_screen(pe, growth_pct, peg_limit):
         passed = False
         reasons.append("P/E not available or ≤ 0")
 
-    if not np.isfinite(growth_pct) or growth_pct <= 0:
+    if not np.isfinite(growth_proxy_pct) or growth_proxy_pct <= 0:
         passed = False
-        reasons.append("5Y CAGR not available or ≤ 0")
+        reasons.append("Growth proxy not available or ≤ 0")
 
     peg = np.nan
     if passed:
-        peg = pe / growth_pct if growth_pct != 0 else np.nan
+        peg = pe / growth_proxy_pct if growth_proxy_pct != 0 else np.nan
         if not np.isfinite(peg):
             passed = False
             reasons.append("PEG could not be computed")
@@ -259,7 +307,7 @@ def peter_lynch_screen(pe, growth_pct, peg_limit):
 
 def graham_intrinsic_value(eps, growth_pct, bond_yield_pct):
     """
-    Classic Graham (approx):
+    Graham (approx):
     Intrinsic = EPS * (8.5 + 2g) * (4.4 / Y)
     g and Y are in percent.
     """
@@ -270,7 +318,7 @@ def graham_intrinsic_value(eps, growth_pct, bond_yield_pct):
     if not np.isfinite(bond_yield_pct) or bond_yield_pct <= 0:
         return np.nan, "Bond yield not valid"
 
-    g = float(np.clip(growth_pct, 0, 25))  # guardrail
+    g = float(np.clip(growth_pct, 0, 25))
     Y = float(bond_yield_pct)
     intrinsic = eps * (8.5 + 2 * g) * (4.4 / Y)
     return intrinsic, f"Used g={g:.2f}% (capped 0–25), Y={Y:.2f}%"
@@ -292,21 +340,35 @@ def compute_value_row(
     mos_pct: float,
     bond_yield: float,
     default_growth: float,
-    eps_mult: float
+    eps_mult: float,
+    lynch_growth_mode: str
 ) -> dict:
     f = fetch_fundamentals(tk)
     price = f["price"]
     eps = f["eps"]
     pe = f["pe"]
     mcap = f["market_cap"]
+    roe_pct = f["roe_pct"]
 
-    growth_pct, growth_src = get_growth_5y_cagr(tk, default_growth)
+    # 5Y CAGR (mainly for Graham)
+    growth_5y_pct, growth_src = get_growth_5y_cagr(tk, default_growth)
+
+    # Lynch growth proxy choice
+    if lynch_growth_mode == "ROE (%)":
+        lynch_growth_pct = roe_pct
+        lynch_growth_src = "ROE (%)"
+    elif lynch_growth_mode == "Default growth (%)":
+        lynch_growth_pct = float(default_growth)
+        lynch_growth_src = "Default growth (%)"
+    else:
+        lynch_growth_pct = growth_5y_pct
+        lynch_growth_src = "5Y CAGR (%)"
 
     # Lynch (PEG)
-    lynch_pass, peg, lynch_reasons = peter_lynch_screen(pe, growth_pct, peg_limit)
+    lynch_pass, peg, lynch_reasons = peter_lynch_screen(pe, lynch_growth_pct, peg_limit)
 
-    # Graham intrinsic
-    intrinsic, graham_note = graham_intrinsic_value(eps, growth_pct, bond_yield)
+    # Graham intrinsic uses 5Y CAGR (kept as-is)
+    intrinsic, graham_note = graham_intrinsic_value(eps, growth_5y_pct, bond_yield)
 
     mos_price = np.nan
     verdict = "N/A"
@@ -335,8 +397,15 @@ def compute_value_row(
         "Current Price": price,
         "P/E": pe,
         "EPS (TTM)": eps,
-        "Growth % (g)": growth_pct,
+        "ROE (%)": roe_pct,
+
+        # Growth used for Graham
+        "Growth % (g)": growth_5y_pct,
         "Growth Source": growth_src,
+
+        # Lynch growth proxy
+        "Lynch Growth Proxy (%)": lynch_growth_pct,
+        "Lynch Growth Source": lynch_growth_src,
 
         # Lynch
         "PEG": peg,
@@ -372,11 +441,6 @@ def load_prices_for_corr(tickers, period):
     return data
 
 def pick_least_correlated(corr_df: pd.DataFrame, n: int):
-    """
-    Greedy selection:
-    - start with lowest-correlation pair
-    - add next ticker that minimizes avg correlation to chosen set
-    """
     tickers = list(corr_df.columns)
     if len(tickers) <= n:
         return tickers
@@ -424,7 +488,7 @@ tabs = st.tabs(["🤖 AI Forecast", "✨ Auto Value Picks + Portfolio Builder"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 1: AI Forecast (kept)
+# TAB 1: AI Forecast
 # ─────────────────────────────────────────────────────────────────────────────
 with tabs[0]:
     st.subheader("🤖 AI Forecast")
@@ -519,7 +583,7 @@ with tabs[0]:
 # ─────────────────────────────────────────────────────────────────────────────
 with tabs[1]:
     st.subheader("✨ Auto Value Picks + Portfolio Builder")
-    st.caption("Growth (g) uses 5Y CAGR: Profit preferred, Sales fallback. Valuation can use Lynch, Graham, EPS×M, or combos.")
+    st.caption("Pick methods (Lynch / Graham / EPS×M) and filters. Lynch growth proxy can be 5Y CAGR or ROE.")
 
     # Screening inputs
     cA, cB, cC, cD = st.columns([1.0, 1.0, 1.0, 1.0])
@@ -537,6 +601,15 @@ with tabs[1]:
             "Default growth% (fallback if 5Y CAGR missing)",
             min_value=0.0, max_value=30.0, value=12.0, step=0.5, key="v_defg"
         )
+
+    # ✅ NEW: Lynch growth proxy selection
+    lynch_growth_mode = st.selectbox(
+        "Peter Lynch growth proxy for PEG",
+        ["5Y CAGR (%)", "ROE (%)", "Default growth (%)"],
+        index=0,
+        key="v_lynch_growth_mode",
+        help="PEG = PE / proxy. Proxy can be 5Y CAGR, ROE, or default growth."
+    )
 
     methods = st.multiselect(
         "Select valuation / screening methods",
@@ -562,7 +635,7 @@ with tabs[1]:
     with u2:
         top_n = st.slider("Show top N picks", 10, 100, 30, 5, key="v_topn")
 
-    # Optional Market cap filter (₹ Crore)
+    # Market cap filter (₹ Crore)
     mc1, mc2 = st.columns([1, 1])
     with mc1:
         min_mcap_cr = st.number_input("Min Market Cap (₹ Crore)", min_value=0, value=0, step=100, key="v_min_mcap_cr")
@@ -595,6 +668,7 @@ with tabs[1]:
             mos_pct=mos_pct,
             bond_yield=bond_yield,
             default_growth=default_growth,
+            lynch_growth_mode=lynch_growth_mode,
             universe_size=universe_size,
             top_n=top_n,
             methods=methods,
@@ -634,12 +708,21 @@ with tabs[1]:
 
             universe = mcap_df["Ticker"].head(universe_size).tolist()
 
-        # Step 2: Run metrics for selected universe
-        with st.spinner("Step 2/3: Computing Lynch/Graham/EPS×M (with 5Y CAGR)..."):
+        # Step 2: Compute metrics
+        with st.spinner("Step 2/3: Computing Lynch/Graham/EPS×M (with 5Y CAGR & ROE option)..."):
             rows = []
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 futures2 = [
-                    ex.submit(compute_value_row, tk, peg_limit, mos_pct, bond_yield, default_growth, eps_mult)
+                    ex.submit(
+                        compute_value_row,
+                        tk,
+                        peg_limit,
+                        mos_pct,
+                        bond_yield,
+                        default_growth,
+                        eps_mult,
+                        lynch_growth_mode
+                    )
                     for tk in universe
                 ]
                 for fut in as_completed(futures2):
@@ -695,7 +778,11 @@ with tabs[1]:
             st.stop()
 
         # Show shortlist columns depending on methods
-        show_cols = ["Ticker", "Current Price", "Mkt Cap", "EPS (TTM)", "P/E", "Growth % (g)", "Growth Source"]
+        show_cols = [
+            "Ticker", "Current Price", "Mkt Cap", "EPS (TTM)", "P/E",
+            "ROE (%)", "Lynch Growth Proxy (%)", "Lynch Growth Source",
+            "Growth % (g)", "Growth Source"
+        ]
 
         if "Peter Lynch (PEG)" in methods:
             show_cols += ["PEG", "Lynch Screen"]
@@ -717,7 +804,7 @@ with tabs[1]:
         # ============================
         st.markdown("---")
         st.subheader("📦 Portfolio Builder (Least Correlated + Monte Carlo)")
-        st.caption("Pick least-correlated basket, then estimate target portfolio value if prices reach chosen MOS target.")
+        st.caption("Pick least-correlated basket, estimate target portfolio value if prices reach chosen MOS target.")
 
         target_mode = st.selectbox(
             "Portfolio target to use",
@@ -733,7 +820,6 @@ with tabs[1]:
             mos_col = f"EPS×M MOS Price ({mos_pct}%)"
             verdict_col = "EPS×M Verdict"
 
-        # Inputs
         pA, pB, pC, pD = st.columns([1, 1, 1, 1])
         with pA:
             invest_amount = st.number_input("Investment Amount (₹)", min_value=1000, value=100000, step=1000, key="pb_amt")
@@ -744,7 +830,6 @@ with tabs[1]:
         with pD:
             rf_rate = st.number_input("Risk-free rate (annual, %)", min_value=0.0, max_value=20.0, value=0.0, step=0.25, key="pb_rf")
 
-        # Candidates from shortlist must have valid MOS target and price
         candidates = shortlist[["Ticker", "Current Price", mos_col, verdict_col]].dropna()
         candidates = candidates[(candidates["Current Price"] > 0) & (candidates[mos_col] > 0)]
 
@@ -877,6 +962,7 @@ with tabs[1]:
 
     else:
         st.info("Click **Run Auto Screening** to generate value picks and unlock the portfolio builder below.")
+
 
 # Navigation
 st.markdown("---")
