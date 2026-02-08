@@ -1,5 +1,6 @@
 # Home.py
 # Updated version - fixes asset resolution, yfinance reliability, mock premium debug
+# FIXED: Removed st.session_state["premium_email"] = ... lines to prevent StreamlitAPIException
 
 import streamlit as st
 import yfinance as yf
@@ -173,6 +174,7 @@ end_date = st.sidebar.date_input(
 )
 
 run_mc = st.sidebar.checkbox("Run Monte Carlo Simulation", key="run_mc", on_change=trigger_run)
+
 num_sims = st.sidebar.number_input("No. of simulations", 1000, 20000, 5000, step=1000, key="num_sims", on_change=trigger_run)
 
 if st.sidebar.button("Run Analysis", key="run_button"):
@@ -199,7 +201,6 @@ st.sidebar.markdown("**Contact:** udaysinghrathore09@gmail.com")
 # ────────────────────────────────────────────────
 # Main logic
 # ────────────────────────────────────────────────
-
 if st.session_state.run_analysis:
     if end_date <= start_date:
         st.error("End Date must be after Start Date")
@@ -233,7 +234,6 @@ if st.session_state.run_analysis:
 
     valid = {k: v for k, v in resolved.items() if v}
     invalid = [k for k, v in resolved.items() if not v]
-
     if invalid:
         st.warning(f"Could not resolve: {', '.join(invalid)}")
     if not valid:
@@ -245,14 +245,13 @@ if st.session_state.run_analysis:
     st.write(dict(zip(valid.keys(), tickers)))
 
     prices = load_prices(tickers, start_date, end_date)
-
     if prices.empty:
         st.error("No price data fetched from Yahoo Finance. Try different dates, fewer tickers, or check your internet.")
         st.stop()
 
     returns = prices.pct_change().dropna()
 
-    # Random allocation (you can later add equal/optimal)
+    # Random allocation
     weights = np.random.random(len(prices.columns))
     weights /= weights.sum()
     allocation = initial_amount * weights
@@ -265,9 +264,7 @@ if st.session_state.run_analysis:
     st.subheader("💰 Portfolio Allocation")
     st.dataframe(alloc_df)
 
-    # Scaled & actual price plots, portfolio value, etc.
-    # (keeping your original plotting logic - just adding robustness)
-
+    # Scaled prices
     scaled_prices = price_scaling(prices)
     scaled_prices["Date"] = scaled_prices.index
     st.subheader("📊 Percentage Change (Scaled)")
@@ -275,6 +272,7 @@ if st.session_state.run_analysis:
                          title="Scaled Price Change (Base = 1.0)")
     st.plotly_chart(fig_scaled, use_container_width=True)
 
+    # Actual prices
     st.subheader("📈 Price Movement (Actual)")
     raw_prices = prices.copy()
     raw_prices["Date"] = raw_prices.index
@@ -336,10 +334,16 @@ if st.session_state.run_analysis:
             if len(tickers) > 1:
                 chosen_ticker = st.selectbox("Select asset for AI prediction", tickers)
 
-            is_premium = email.lower().strip() in st.session_state.premium_users
+            email_clean = email.lower().strip()
+            is_premium = email_clean in st.session_state.premium_users
 
-            if not is_premium:
+            if is_premium:
+                st.success(f"✅ Premium Active for {email}")
+                if st.button("Open AI Premium Prediction →", type="primary"):
+                    st.switch_page("pages/AI_Prediction.py")
+            else:
                 st.info("🔒 Premium feature locked.")
+                st.markdown("**Subscribe to unlock AI predictions**")
 
                 if st.button("Subscribe for ₹999/mo via Razorpay", type="primary"):
                     if client is None:
@@ -377,49 +381,42 @@ if st.session_state.run_analysis:
                             st.info("Complete payment in popup → copy Payment ID & Signature below.")
                             if "pending_order" not in st.session_state:
                                 st.session_state.pending_order = {}
-                            st.session_state.pending_order[email] = order["id"]
+                            st.session_state.pending_order[email_clean] = order["id"]
                         except Exception as e:
                             st.error(f"Order creation failed: {e}")
 
                 # Verification form
-                if email in st.session_state.get("pending_order", {}):
+                if email_clean in st.session_state.get("pending_order", {}):
                     st.markdown("### Verify Payment")
-                    pid = st.text_input("Payment ID", key=f"pid_{email}")
-                    sig = st.text_input("Signature", key=f"sig_{email}")
+                    pid = st.text_input("Payment ID", key=f"pid_{email_clean}")
+                    sig = st.text_input("Signature", key=f"sig_{email_clean}")
                     if st.button("Verify & Unlock"):
                         try:
                             params = {
-                                "razorpay_order_id": st.session_state.pending_order[email],
+                                "razorpay_order_id": st.session_state.pending_order[email_clean],
                                 "razorpay_payment_id": pid,
                                 "razorpay_signature": sig
                             }
                             client.utility.verify_payment_signature(params)
                             save_premium_user(email)
-                            st.session_state.premium_users.add(email.lower().strip())
-                            st.session_state["premium_email"] = email.lower().strip()
-                            del st.session_state.pending_order[email]
+                            st.session_state.premium_users.add(email_clean)
+                            del st.session_state.pending_order[email_clean]
                             st.success("Premium unlocked!")
                             st.rerun()
                         except Exception as e:
                             st.error(f"Verification failed: {e}")
 
-                # Developer mock override with debug
+                # Developer mock override
                 with st.expander("Developer Override (Mock Payment)"):
                     if st.button(f"Simulate Successful Payment for {email}"):
                         try:
                             save_premium_user(email)
-                            st.session_state.premium_users.add(email.lower().strip())
-                            st.session_state["premium_email"] = email.lower().strip()
+                            st.session_state.premium_users.add(email_clean)
                             st.success("Mock payment success → Premium active!")
                             st.rerun()
                         except Exception as e:
                             st.error(f"Mock failed inside save_premium_user: {str(e)}")
                             st.exception(e)  # shows traceback
-
-            else:
-                st.success(f"Premium Active for {email}")
-                if st.button("Open AI Premium Prediction →", type="primary"):
-                    st.switch_page("pages/AI_Prediction.py")
 
 else:
     st.info("Select assets / adjust inputs → graphs update automatically.")
