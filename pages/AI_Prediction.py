@@ -1,6 +1,8 @@
 # pages/AI_Prediction.py
-# ✅ Your same code, only fixed NSE equity list loading (LIVE NSE -> fallback local CSV)
-# ✅ No more: "Could not load NSE equity list right now."
+# ✅ FULL UPDATED FILE (paste & replace)
+# ✅ FIX 1: NSE list robust (LIVE NSE -> fallback ../data/EQUITY_L.csv) so no "Could not load NSE equity list"
+# ✅ FIX 2: Value Picks results persist after reruns (amount sliders etc won't reset)
+# ✅ Keeps your Lynch → Graham → MOS (5Y CAGR only) + correlation + least-correlated basket + Monte Carlo
 
 import streamlit as st
 import yfinance as yf
@@ -17,7 +19,7 @@ import seaborn as sns
 from utils import advanced_ai_prediction
 from auth_store import load_premium_users
 
-# ✅ added imports (for robust NSE loading)
+# ✅ added for robust NSE loading
 import requests
 from io import StringIO
 from pathlib import Path
@@ -27,6 +29,19 @@ from pathlib import Path
 # Page config (ONLY ONCE)
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="AI Premium Prediction", layout="wide")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Persist screening results across reruns (FIX for "goes back to before screening")
+# ─────────────────────────────────────────────────────────────────────────────
+if "screen_done" not in st.session_state:
+    st.session_state.screen_done = False
+if "screen_df" not in st.session_state:
+    st.session_state.screen_df = None
+if "screen_shortlist" not in st.session_state:
+    st.session_state.screen_shortlist = None
+if "screen_inputs" not in st.session_state:
+    st.session_state.screen_inputs = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -42,9 +57,9 @@ ETF_MAP = {
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_nse_stock_list():
     """
-    ✅ FIXED:
-    1) Try LIVE NSE CSV (often blocked on Streamlit Cloud)
-    2) Fallback to repo file: ../data/EQUITY_L.csv (robust path)
+    ✅ Robust NSE loader:
+    1) Try LIVE NSE CSV with headers
+    2) Fallback to repo file: ../data/EQUITY_L.csv (since this file is in pages/)
     """
     url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
 
@@ -71,7 +86,7 @@ def load_nse_stock_list():
     except Exception:
         pass
 
-    # 2) LOCAL fallback: repo_root/data/EQUITY_L.csv (AI_Prediction.py is in pages/)
+    # 2) LOCAL fallback: repo_root/data/EQUITY_L.csv
     try:
         base_dir = Path(__file__).resolve().parent        # .../pages
         csv_path = base_dir.parent / "data" / "EQUITY_L.csv"
@@ -458,7 +473,7 @@ with tabs[0]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 2: Auto Value Picks + Portfolio Builder
+# TAB 2: Auto Value Picks + Portfolio Builder (FIXED persistence)
 # ─────────────────────────────────────────────────────────────────────────────
 with tabs[1]:
     st.subheader("✨ Auto Value Picks (Lynch → Graham → MOS) + Portfolio Builder")
@@ -489,7 +504,7 @@ with tabs[1]:
     with c2:
         top_n = st.slider("Show top N picks", 10, 100, 30, 5, key="v_topn")
 
-    # Build NSE universe tickers (✅ now robust)
+    # Build NSE universe tickers (robust)
     stock_map = load_nse_stock_list()
     all_tickers = list(stock_map.values())
 
@@ -501,8 +516,21 @@ with tabs[1]:
         )
         st.stop()
 
-    if st.button("Run Auto Screening", type="primary", key="run_value_screen"):
+    # Button click (runs once, results persist)
+    run_clicked = st.button("Run Auto Screening", type="primary", key="run_value_screen")
+
+    if run_clicked:
         max_workers = 24
+
+        # Save inputs used for this run
+        st.session_state.screen_inputs = dict(
+            peg_limit=peg_limit,
+            mos_pct=mos_pct,
+            bond_yield=bond_yield,
+            default_growth=default_growth,
+            universe_size=universe_size,
+            top_n=top_n
+        )
 
         # Step 1: Top by market cap
         with st.spinner("Step 1/3: Selecting universe by market cap..."):
@@ -541,18 +569,37 @@ with tabs[1]:
 
             df = pd.DataFrame(rows)
 
-        # Shortlist
         shortlist = df[
             (df["Lynch Screen"] == "PASS") &
             (df["Verdict"] == "Undervalued ✅")
         ].copy().sort_values("MOS Gap % (MOS - Price)", ascending=False)
 
+        # ✅ Persist results (this is the key fix)
+        st.session_state.screen_df = df
+        st.session_state.screen_shortlist = shortlist
+        st.session_state.screen_done = True
+
+    # ✅ Render if already screened (so changing sliders/amount won't reset)
+    if st.session_state.screen_done:
+        df = st.session_state.screen_df
+        shortlist = st.session_state.screen_shortlist
+
         st.success("Auto screening complete ✅")
 
+        # Reset button
+        colR1, colR2 = st.columns([1, 5])
+        with colR1:
+            if st.button("Reset screening"):
+                st.session_state.screen_done = False
+                st.session_state.screen_df = None
+                st.session_state.screen_shortlist = None
+                st.rerun()
+
         st.markdown("### ✅ Shortlist (Lynch PASS + Undervalued with MOS)")
-        if shortlist.empty:
+        if shortlist is None or shortlist.empty:
             st.info("No stocks met both conditions with current inputs. Try adjusting PEG limit/MOS/bond yield.")
-            st.dataframe(df.sort_values("Mkt Cap", ascending=False), use_container_width=True)
+            if df is not None:
+                st.dataframe(df.sort_values("Mkt Cap", ascending=False), use_container_width=True)
             st.stop()
 
         st.dataframe(
@@ -568,13 +615,12 @@ with tabs[1]:
         st.dataframe(df.sort_values("Mkt Cap", ascending=False), use_container_width=True)
 
         # ============================
-        # Step 3/3: Portfolio Builder
+        # Portfolio Builder (Correlation → Least correlated basket → Target-to-MOS → Monte Carlo)
         # ============================
         st.markdown("---")
         st.subheader("📦 Build a Diversified MOS Portfolio (Least Correlated + Monte Carlo)")
-        st.caption("We compute a correlation heatmap of shortlisted stocks, pick least-correlated basket, then estimate portfolio value if prices reach MOS.")
+        st.caption("Correlation heatmap of shortlisted stocks, least-correlated basket, then estimate portfolio value if prices reach MOS.")
 
-        # Inputs
         pA, pB, pC, pD = st.columns([1, 1, 1, 1])
         with pA:
             invest_amount = st.number_input("Investment Amount (₹)", min_value=1000, value=100000, step=1000, key="pb_amt")
@@ -587,7 +633,6 @@ with tabs[1]:
 
         mos_col = f"MOS Price ({mos_pct}%)"
 
-        # Candidates must have valid MOS + price
         candidates = shortlist[["Ticker", "Current Price", mos_col]].dropna()
         candidates = candidates[(candidates["Current Price"] > 0) & (candidates[mos_col] > 0)]
 
@@ -605,29 +650,25 @@ with tabs[1]:
         rets = prices_corr.pct_change().dropna()
         corr = rets.corr()
 
-        # Heatmap (like home)
         st.markdown("### 🔥 Correlation Heatmap (Shortlisted Stocks)")
         fig_hm = plt.figure(figsize=(12, 8))
         sns.heatmap(corr, annot=False, cmap="RdYlGn", center=0)
         st.pyplot(fig_hm)
         plt.close()
 
-        # Choose least-correlated basket
         selected_tickers = pick_least_correlated(corr, int(pick_n))
 
         st.markdown("### ✅ Selected Least-Correlated Basket")
         st.write(", ".join(selected_tickers))
 
         basket = candidates[candidates["Ticker"].isin(selected_tickers)].copy().set_index("Ticker")
-        basket = basket.loc[selected_tickers]  # keep order
+        basket = basket.loc[selected_tickers]
 
-        # Target returns if reach MOS
         basket["Target Return to MOS (%)"] = ((basket[mos_col] / basket["Current Price"]) - 1) * 100
 
         st.markdown("### 🎯 Upside if Each Stock Reaches its MOS Price")
         st.dataframe(basket[["Current Price", mos_col, "Target Return to MOS (%)"]], use_container_width=True)
 
-        # Covariance for risk
         rets_sel = rets[selected_tickers].dropna()
         if rets_sel.empty:
             st.error("No aligned return data for selected tickers. Try increasing lookback.")
@@ -635,11 +676,9 @@ with tabs[1]:
 
         cov_daily = rets_sel.cov().values
 
-        # Target multiplier and upside vector
         target_multiplier = (basket[mos_col].values / basket["Current Price"].values)
-        exp_upside = basket["Target Return to MOS (%)"].values / 100.0  # fraction
+        exp_upside = basket["Target Return to MOS (%)"].values / 100.0
 
-        # Example random allocation
         st.markdown("### 💰 Example Allocation (Random Weights) + Target Portfolio Value at MOS")
         rand_w = np.random.random(len(selected_tickers))
         rand_w = rand_w / rand_w.sum()
@@ -659,7 +698,6 @@ with tabs[1]:
         st.dataframe(alloc_df, use_container_width=True)
         st.metric("Target Portfolio Value if All Reach MOS", f"₹{target_value:,.0f}", f"{target_gain:.2f}%")
 
-        # Monte Carlo optimizer
         st.markdown("### 🎯 Monte Carlo Optimization (Max Sharpe-like using MOS Upside)")
         m1, m2, m3 = st.columns([1, 1, 1])
         with m1:
@@ -680,13 +718,8 @@ with tabs[1]:
             w = w / w.sum()
             weight_store.append(w)
 
-            # "Return" proxy: weighted MOS-upside (one-time)
             port_ret = float(np.dot(w, exp_upside))
-
-            # Risk from historical covariance
             port_vol = float(np.sqrt(np.dot(w.T, np.dot(cov_daily, w)))) * vol_scale
-
-            # Sharpe-like
             sharpe_like = (port_ret - rf) / port_vol if port_vol > 0 else np.nan
             results.append([port_ret, port_vol, sharpe_like])
 
@@ -714,7 +747,6 @@ with tabs[1]:
         st.metric("Best Target Portfolio Value at MOS", f"₹{best_target_value:,.0f}", f"{best_gain:.2f}%")
         st.caption("Sharpe-like uses MOS-upside as return proxy and historical covariance as risk proxy.")
 
-        # Scatter plot
         fig_mc = px.scatter(
             sim_df,
             x="Volatility",
@@ -734,6 +766,9 @@ with tabs[1]:
 
         st.markdown(f"### Top {int(show_top)} Portfolios")
         st.dataframe(sim_df.sort_values("Sharpe_Like", ascending=False).head(int(show_top)), use_container_width=True)
+
+    else:
+        st.info("Click **Run Auto Screening** to generate value picks and unlock the portfolio builder below.")
 
 # Navigation
 st.markdown("---")
