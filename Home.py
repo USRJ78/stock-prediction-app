@@ -1,5 +1,16 @@
-# (Updated code without rapidfuzz)
-# Uses difflib instead of rapidfuzz to avoid extra dependencies
+# Home.py
+# ✅ FULL UPDATED FILE (paste & replace)
+#
+# FIXED:
+# ✅ NSE dropdown options will NEVER vanish again.
+#   - Tries LIVE NSE CSV with browser headers
+#   - If blocked, falls back to local repo file: data/EQUITY_L.csv  ✅ (YOU MUST ADD THIS FILE)
+# ✅ Keeps your original search bar + all graphs + structure (no removals)
+#
+# IMPORTANT:
+# Create this file in your repo:
+#   data/EQUITY_L.csv
+# (Download once from NSE and commit it)
 
 import streamlit as st
 import yfinance as yf
@@ -17,8 +28,8 @@ import hashlib
 import razorpay             # ← added
 import json                 # ← added
 import time                 # ← added for receipt id
+from io import StringIO     # ✅ added for robust CSV parsing
 from auth_store import save_premium_user
-from io import StringIO     # ✅ added (for robust NSE CSV parsing)
 
 st.set_page_config(page_title="Universal Market App", layout="wide")
 
@@ -61,12 +72,20 @@ def trigger_run():
 
 # ------------------ Helpers ------------------
 
+ETF_MAP = {
+    "NIFTY 50 ETF": "NIFTYBEES.NS",
+    "BANK NIFTY ETF": "BANKBEES.NS",
+    "GOLD ETF": "GOLDBEES.NS",
+    "IT ETF": "ITBEES.NS",
+}
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_nse_stock_list():
     """
-    ✅ Fix for NSE blocking urllib/pandas read_csv.
-    Uses requests with browser-like headers.
-    IMPORTANT: Never crashes the app. Returns {} on failure.
+    ✅ NSE dropdown NEVER disappears:
+      1) Try live NSE CSV with headers
+      2) If blocked, fallback to local repo: data/EQUITY_L.csv  (YOU MUST COMMIT THIS)
+    Returns dict: {COMPANY_NAME_UPPER: "SYMBOL.NS"}
     """
     url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
 
@@ -78,29 +97,44 @@ def load_nse_stock_list():
         "Connection": "keep-alive",
     }
 
+    def parse_df(df: pd.DataFrame) -> dict:
+        df["SYMBOL"] = df["SYMBOL"].astype(str).str.upper().str.strip() + ".NS"
+        df["NAME OF COMPANY"] = df["NAME OF COMPANY"].astype(str).str.upper().str.strip()
+        return dict(zip(df["NAME OF COMPANY"], df["SYMBOL"]))
+
+    # 1) Live NSE
     try:
         r = requests.get(url, headers=headers, timeout=20)
         r.raise_for_status()
         df = pd.read_csv(StringIO(r.text))
-        df["SYMBOL"] = df["SYMBOL"].astype(str).str.upper().str.strip() + ".NS"
-        return dict(zip(df["NAME OF COMPANY"].astype(str).str.upper().str.strip(), df["SYMBOL"]))
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return parse_df(df)
     except Exception:
-        # ✅ fallback (keeps app alive; dropdown still works for ETFs + manual ticker entry)
-        return {}
+        pass
 
-ETF_MAP = {
-    "NIFTY 50 ETF": "NIFTYBEES.NS",
-    "BANK NIFTY ETF": "BANKBEES.NS",
-    "GOLD ETF": "GOLDBEES.NS",
-    "IT ETF": "ITBEES.NS",
-}
+    # 2) Local fallback in repo
+    try:
+        df = pd.read_csv("data/EQUITY_L.csv")
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return parse_df(df)
+    except Exception:
+        pass
+
+    return {}
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_search_options():
+    stock_map = load_nse_stock_list() or {}
+    return sorted(list(stock_map.keys()) + list(ETF_MAP.keys()))
 
 @st.cache_data(ttl=3600)
 def resolve_assets(user_inputs):
     stock_map = load_nse_stock_list() or {}
     resolved = {}
     for item in user_inputs:
-        key = item.upper().strip()
+        key = str(item).upper().strip()
+        if not key:
+            continue
         if "." in key:
             resolved[item] = key
         elif key in ETF_MAP:
@@ -138,16 +172,14 @@ def price_scaling(raw_prices_df):
 
 st.sidebar.header("Inputs")
 
-@st.cache_data(ttl=3600)
-def load_search_options():
-    stock_map = load_nse_stock_list() or {}
-    return sorted(list(stock_map.keys()) + list(ETF_MAP.keys()))
-
 search_options = load_search_options()
 
-# (Optional warning, DOES NOT remove search bar)
+# If both NSE live + local file missing, only ETFs will show -> warn
 if len(search_options) <= len(ETF_MAP):
-    st.sidebar.warning("NSE stock list temporarily unavailable. You can still type tickers manually (e.g., RELIANCE.NS).")
+    st.sidebar.warning(
+        "Stock list unavailable. Please add data/EQUITY_L.csv to your repo. "
+        "You can still type tickers manually (e.g., RELIANCE.NS)."
+    )
 
 selected_assets = st.sidebar.multiselect(
     "🔍 Search & select stocks / ETFs (recommended)",
@@ -414,6 +446,7 @@ if st.session_state.run_analysis:
                 st.markdown("- Confidence Intervals")
                 st.markdown("- AI Recommendations")
 
+                # ─── Razorpay Payment Button ────────────────────────────────────
                 if st.button("Subscribe for ₹999/mo via Razorpay", type="primary"):
                     if client is None:
                         st.error("Razorpay not configured – check secrets.")
@@ -459,6 +492,7 @@ if st.session_state.run_analysis:
                         except Exception as e:
                             st.error(f"Failed to create order: {e}")
 
+                # Verification section
                 if email in st.session_state.get("pending_order", {}):
                     st.markdown("### Verify Your Payment")
                     payment_id = st.text_input("Razorpay Payment ID", key=f"pid_{email}")
@@ -472,7 +506,7 @@ if st.session_state.run_analysis:
                             }
                             client.utility.verify_payment_signature(params)
                             save_premium_user(email)
-                            st.session_state["premium_email"] = email.lower().strip()
+                            st.session_state["premium_email"] = email.lower().strip()  # Save for cross-page use
                             del st.session_state.pending_order[email]
                             st.success("Payment verified! Premium features unlocked 🎉")
                             st.rerun()
@@ -481,10 +515,11 @@ if st.session_state.run_analysis:
                         except Exception as e:
                             st.error(f"Error during verification: {e}")
 
+                # Optional dev mock (keep or remove)
                 with st.expander("Developer Override (Mock Payment)"):
                     if st.button(f"Simulate Successful Payment (for {email})"):
                         save_premium_user(email)
-                        st.session_state["premium_email"] = email.lower().strip()
+                        st.session_state["premium_email"] = email.lower().strip() # Save for cross-page use
                         st.rerun()
 
             else:
