@@ -1,6 +1,4 @@
 # Home.py
-# Updated version - fixes asset resolution, yfinance reliability, mock premium debug
-# FIXED: Removed st.session_state["premium_email"] = ... lines to prevent StreamlitAPIException
 
 import streamlit as st
 import yfinance as yf
@@ -11,7 +9,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import seaborn as sns
 from difflib import get_close_matches
-from utils import advanced_ai_prediction
+from utils import advanced_ai_prediction, load_nse_stock_list   # ← updated import
 from datetime import date
 import requests
 import hashlib
@@ -20,15 +18,14 @@ import json
 import time
 from io import StringIO
 from auth_store import save_premium_user
-import os  # added for debug
 
 st.set_page_config(page_title="Universal Market App", layout="wide")
 
-# Mock database of premium users (in-memory fallback)
+# Mock premium users (in-memory)
 if "premium_users" not in st.session_state:
     st.session_state.premium_users = set()
 
-# Razorpay setup – uses secrets
+# Razorpay
 try:
     RAZORPAY_KEY_ID = st.secrets["RAZORPAY_KEY_ID"]
     RAZORPAY_KEY_SECRET = st.secrets["RAZORPAY_KEY_SECRET"]
@@ -37,7 +34,7 @@ except Exception as e:
     st.error("Razorpay keys not set in Streamlit secrets.")
     client = None
 
-SUBSCRIPTION_AMOUNT = 99900  # paise → ₹999
+SUBSCRIPTION_AMOUNT = 99900
 SUBSCRIPTION_CURRENCY = "INR"
 SUBSCRIPTION_NAME = "Universal Market App Premium"
 SUBSCRIPTION_DESC = "AI Predictions + Advanced Features"
@@ -45,61 +42,23 @@ SUBSCRIPTION_DESC = "AI Predictions + Advanced Features"
 st.title("📊 Universal Stock & ETF Portfolio App")
 st.markdown("Search by **name or ticker**, allocate capital, and run portfolio simulations.")
 
-# Premium AI Config
 API_URL = "https://universal-market-app-1.onrender.com"
 
 def user_id_from_email(email: str) -> str:
     return hashlib.md5(email.strip().lower().encode()).hexdigest()
 
-# Run-state fix
 if "run_analysis" not in st.session_state:
     st.session_state.run_analysis = False
 
 def trigger_run():
     st.session_state.run_analysis = True
 
-# Helpers
 ETF_MAP = {
     "NIFTY 50 ETF": "NIFTYBEES.NS",
     "BANK NIFTY ETF": "BANKBEES.NS",
     "GOLD ETF": "GOLDBEES.NS",
     "IT ETF": "ITBEES.NS",
 }
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_nse_stock_list():
-    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/csv,*/*;q=0.9",
-        "Referer": "https://www.nseindia.com/",
-    }
-
-    def parse_df(df: pd.DataFrame) -> dict:
-        df["SYMBOL"] = df["SYMBOL"].astype(str).str.upper().str.strip() + ".NS"
-        df["NAME OF COMPANY"] = df["NAME OF COMPANY"].astype(str).str.upper().str.strip()
-        return dict(zip(df["NAME OF COMPANY"], df["SYMBOL"]))
-
-    # 1. Try live
-    try:
-        r = requests.get(url, headers=headers, timeout=15)
-        r.raise_for_status()
-        df = pd.read_csv(StringIO(r.text))
-        if not df.empty and "SYMBOL" in df.columns:
-            return parse_df(df)
-    except Exception:
-        pass
-
-    # 2. Local fallback
-    try:
-        if os.path.exists("data/EQUITY_L.csv"):
-            df = pd.read_csv("data/EQUITY_L.csv")
-            if not df.empty and "SYMBOL" in df.columns:
-                return parse_df(df)
-    except Exception:
-        pass
-
-    return {}
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_search_options():
@@ -121,7 +80,7 @@ def load_prices(tickers, start, end, retries=2):
             time.sleep(2)
         except Exception:
             time.sleep(2)
-    return pd.DataFrame()  # empty on failure
+    return pd.DataFrame()
 
 def price_scaling(raw_prices_df):
     scaled = raw_prices_df.copy()
@@ -130,12 +89,13 @@ def price_scaling(raw_prices_df):
             scaled[col] = scaled[col] / scaled[col].iloc[0]
     return scaled
 
-# Sidebar
+# ── Sidebar ───────────────────────────────────────────────
+
 st.sidebar.header("Inputs")
 search_options = load_search_options()
 
 if len(search_options) <= len(ETF_MAP):
-    st.sidebar.warning("Stock list limited. Add data/EQUITY_L.csv to repo or use manual tickers.")
+    st.sidebar.warning("Stock list limited. Add data/EQUITY_L.csv or use manual tickers.")
 
 selected_assets = st.sidebar.multiselect(
     "🔍 Search & select stocks / ETFs",
@@ -151,36 +111,15 @@ manual_assets = st.sidebar.text_input(
     on_change=trigger_run
 )
 
-initial_amount = st.sidebar.number_input(
-    "Initial Investment (INR)",
-    value=100000,
-    step=10000,
-    key="initial_amount",
-    on_change=trigger_run
-)
-
-start_date = st.sidebar.date_input(
-    "Start Date",
-    date(2023, 1, 1),
-    key="start_date",
-    on_change=trigger_run
-)
-
-end_date = st.sidebar.date_input(
-    "End Date",
-    date.today(),
-    key="end_date",
-    on_change=trigger_run
-)
-
+initial_amount = st.sidebar.number_input("Initial Investment (INR)", value=100000, step=10000, key="initial_amount", on_change=trigger_run)
+start_date = st.sidebar.date_input("Start Date", date(2023, 1, 1), key="start_date", on_change=trigger_run)
+end_date = st.sidebar.date_input("End Date", date.today(), key="end_date", on_change=trigger_run)
 run_mc = st.sidebar.checkbox("Run Monte Carlo Simulation", key="run_mc", on_change=trigger_run)
-
 num_sims = st.sidebar.number_input("No. of simulations", 1000, 20000, 5000, step=1000, key="num_sims", on_change=trigger_run)
 
 if st.sidebar.button("Run Analysis", key="run_button"):
     st.session_state.run_analysis = True
 
-# Premium AI
 st.sidebar.markdown("---")
 st.sidebar.markdown("## 🔮 AI Prediction (Premium)")
 ai_enabled = st.sidebar.checkbox("Enable AI Prediction", key="ai_enabled", on_change=trigger_run)
@@ -188,9 +127,7 @@ email = st.sidebar.text_input("Email (for premium access)", key="premium_email")
 
 horizon_map = {"1W": 5, "1M": 21, "3M": 63, "1Y": 252}
 horizon_label = st.sidebar.selectbox("Horizon", list(horizon_map.keys()), index=1, key="ai_horizon", on_change=trigger_run)
-horizon_days = horizon_map[horizon_label]
 
-# Legal links
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Legal & Policies**")
 st.sidebar.markdown("- [Privacy Policy](https://drive.google.com/file/d/1JLl2BzpkHDpz6-cfMR6b-wiXpcN6dKet/view?usp=sharing)")
@@ -198,9 +135,8 @@ st.sidebar.markdown("- [Terms of Service](https://drive.google.com/file/d/1VABpc
 st.sidebar.markdown("- [Refund & Cancellation Policy](https://drive.google.com/file/d/1i0g2g9YdNASv1UyweBiiNEtXyxM_7H3A/view?usp=sharing)")
 st.sidebar.markdown("**Contact:** udaysinghrathore09@gmail.com")
 
-# ────────────────────────────────────────────────
-# Main logic
-# ────────────────────────────────────────────────
+# ── Main content ───────────────────────────────────────────────
+
 if st.session_state.run_analysis:
     if end_date <= start_date:
         st.error("End Date must be after Start Date")
@@ -211,13 +147,11 @@ if st.session_state.run_analysis:
         st.error("Select or enter at least one asset")
         st.stop()
 
-    # Improved resolve_assets
     stock_map = load_nse_stock_list() or {}
     resolved = {}
     for item in user_assets:
         key = str(item).upper().strip()
-        if not key:
-            continue
+        if not key: continue
         if key.endswith(".NS"):
             resolved[item] = key
             continue
@@ -229,7 +163,6 @@ if st.session_state.run_analysis:
             if matches:
                 resolved[item] = stock_map[matches[0]]
                 continue
-        # Last resort - assume symbol
         resolved[item] = key + ".NS"
 
     valid = {k: v for k, v in resolved.items() if v}
@@ -246,12 +179,11 @@ if st.session_state.run_analysis:
 
     prices = load_prices(tickers, start_date, end_date)
     if prices.empty:
-        st.error("No price data fetched from Yahoo Finance. Try different dates, fewer tickers, or check your internet.")
+        st.error("No price data fetched from Yahoo Finance. Try different dates or fewer tickers.")
         st.stop()
 
     returns = prices.pct_change().dropna()
 
-    # Random allocation
     weights = np.random.random(len(prices.columns))
     weights /= weights.sum()
     allocation = initial_amount * weights
@@ -264,23 +196,19 @@ if st.session_state.run_analysis:
     st.subheader("💰 Portfolio Allocation")
     st.dataframe(alloc_df)
 
-    # Scaled prices
+    # Graphs (your original logic kept)
     scaled_prices = price_scaling(prices)
     scaled_prices["Date"] = scaled_prices.index
     st.subheader("📊 Percentage Change (Scaled)")
-    fig_scaled = px.line(scaled_prices, x="Date", y=scaled_prices.columns[:-1],
-                         title="Scaled Price Change (Base = 1.0)")
+    fig_scaled = px.line(scaled_prices, x="Date", y=scaled_prices.columns[:-1], title="Scaled Price Change (Base = 1.0)")
     st.plotly_chart(fig_scaled, use_container_width=True)
 
-    # Actual prices
     st.subheader("📈 Price Movement (Actual)")
     raw_prices = prices.copy()
     raw_prices["Date"] = raw_prices.index
-    fig_raw = px.line(raw_prices, x="Date", y=raw_prices.columns[:-1],
-                      title="Actual Prices")
+    fig_raw = px.line(raw_prices, x="Date", y=raw_prices.columns[:-1], title="Actual Prices")
     st.plotly_chart(fig_raw, use_container_width=True)
 
-    # Portfolio value over time
     portfolio_positions = (prices / prices.iloc[0]) * allocation
     portfolio_value = portfolio_positions.sum(axis=1)
     port_df = pd.DataFrame({"Date": portfolio_value.index, "Portfolio Value": portfolio_value})
@@ -288,7 +216,6 @@ if st.session_state.run_analysis:
     fig_port = px.line(port_df, x="Date", y="Portfolio Value", title="Portfolio Value Over Time")
     st.plotly_chart(fig_port, use_container_width=True)
 
-    # Monte Carlo
     if run_mc:
         st.subheader("🎯 Monte Carlo Simulation")
         mean_returns = returns.mean() * 252
@@ -309,26 +236,21 @@ if st.session_state.run_analysis:
         best_return = sim_df.loc[best_idx, "Return"]
         best_vol = sim_df.loc[best_idx, "Volatility"]
 
-        fig_mc = px.scatter(sim_df, x="Volatility", y="Return", color="Sharpe",
-                            title="Monte Carlo Portfolios")
-        fig_mc.add_scatter(x=[best_vol], y=[best_return], mode="markers",
-                           marker=dict(size=15, color="red"), name="Best Sharpe")
+        fig_mc = px.scatter(sim_df, x="Volatility", y="Return", color="Sharpe", title="Monte Carlo Portfolios")
+        fig_mc.add_scatter(x=[best_vol], y=[best_return], mode="markers", marker=dict(size=15, color="red"), name="Best Sharpe")
         st.plotly_chart(fig_mc, use_container_width=True)
 
         st.subheader("Optimal Weights (Max Sharpe)")
-        best_weights = pd.DataFrame({
-            "Asset": prices.columns,
-            "Weight": weight_list[best_idx]
-        }).sort_values("Weight", ascending=False)
+        best_weights = pd.DataFrame({"Asset": prices.columns, "Weight": weight_list[best_idx]}).sort_values("Weight", ascending=False)
         st.dataframe(best_weights)
 
-    # ─── Premium AI Section ───
+    # Premium AI section
     if ai_enabled:
         st.markdown("---")
         st.subheader("🔮 AI Return Prediction (Premium)")
 
         if not email:
-            st.warning("Enter your email in sidebar to use Premium AI.")
+            st.warning("Enter your email in sidebar.")
         else:
             chosen_ticker = tickers[0] if tickers else None
             if len(tickers) > 1:
@@ -378,14 +300,13 @@ if st.session_state.run_analysis:
                             </script>
                             """
                             st.components.v1.html(js, height=1)
-                            st.info("Complete payment in popup → copy Payment ID & Signature below.")
+                            st.info("Complete payment → copy Payment ID & Signature below.")
                             if "pending_order" not in st.session_state:
                                 st.session_state.pending_order = {}
                             st.session_state.pending_order[email_clean] = order["id"]
                         except Exception as e:
                             st.error(f"Order creation failed: {e}")
 
-                # Verification form
                 if email_clean in st.session_state.get("pending_order", {}):
                     st.markdown("### Verify Payment")
                     pid = st.text_input("Payment ID", key=f"pid_{email_clean}")
@@ -406,7 +327,6 @@ if st.session_state.run_analysis:
                         except Exception as e:
                             st.error(f"Verification failed: {e}")
 
-                # Developer mock override
                 with st.expander("Developer Override (Mock Payment)"):
                     if st.button(f"Simulate Successful Payment for {email}"):
                         try:
@@ -415,8 +335,8 @@ if st.session_state.run_analysis:
                             st.success("Mock payment success → Premium active!")
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Mock failed inside save_premium_user: {str(e)}")
-                            st.exception(e)  # shows traceback
+                            st.error(f"Mock failed: {str(e)}")
+                            st.exception(e)
 
 else:
     st.info("Select assets / adjust inputs → graphs update automatically.")
