@@ -1,6 +1,8 @@
 # Home.py
-# Updated version - fixes asset resolution, yfinance reliability, mock premium debug
-# FIXED: Removed st.session_state["premium_email"] = ... lines to prevent StreamlitAPIException
+# ✅ FULL UPDATED FILE (paste & replace)
+# ✅ Restores: Daily Returns line chart, Rolling Volatility (%), Correlation Heatmap, Histogram
+# ✅ Keeps EVERYTHING else exactly as in your pasted file (no unnecessary removals)
+# ✅ Keeps NSE live + local fallback loader
 
 import streamlit as st
 import yfinance as yf
@@ -175,7 +177,12 @@ end_date = st.sidebar.date_input(
 
 run_mc = st.sidebar.checkbox("Run Monte Carlo Simulation", key="run_mc", on_change=trigger_run)
 
-num_sims = st.sidebar.number_input("No. of simulations", 1000, 20000, 5000, step=1000, key="num_sims", on_change=trigger_run)
+num_sims = st.sidebar.number_input(
+    "No. of simulations",
+    1000, 20000, 5000, step=1000,
+    key="num_sims",
+    on_change=trigger_run
+)
 
 if st.sidebar.button("Run Analysis", key="run_button"):
     st.session_state.run_analysis = True
@@ -251,6 +258,51 @@ if st.session_state.run_analysis:
 
     returns = prices.pct_change().dropna()
 
+    # ✅ RESTORED SECTION: Daily Returns + Rolling Volatility + Heatmap + Histogram
+    daily_returns_pct = returns * 100
+    daily_returns_pct["Date"] = daily_returns_pct.index
+
+    st.subheader("📉 Daily Returns (%)")
+    fig_ret = px.line(
+        daily_returns_pct,
+        x="Date",
+        y=[c for c in daily_returns_pct.columns if c != "Date"],
+        title="Daily Percentage Returns (%)"
+    )
+    fig_ret.update_layout({'plot_bgcolor': "white"})
+    st.plotly_chart(fig_ret, use_container_width=True)
+
+    st.subheader("📌 Rolling Volatility (Annualized, %)")
+    rolling_window = 21
+    rolling_vol = returns.rolling(rolling_window).std() * np.sqrt(252) * 100
+    rolling_vol = rolling_vol.dropna()
+    if not rolling_vol.empty:
+        rolling_vol_df = rolling_vol.copy()
+        rolling_vol_df["Date"] = rolling_vol_df.index
+        fig_vol = px.line(
+            rolling_vol_df,
+            x="Date",
+            y=[c for c in rolling_vol_df.columns if c != "Date"],
+            title=f"Rolling Volatility ({rolling_window}D, Annualized %)"
+        )
+        fig_vol.update_layout({'plot_bgcolor': "white"})
+        st.plotly_chart(fig_vol, use_container_width=True)
+    else:
+        st.info("Not enough data points to compute rolling volatility (try a longer date range).")
+
+    st.subheader("🔥 Correlation Heatmap")
+    corr_df = returns.corr()
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(corr_df, annot=True)
+    st.pyplot(plt.gcf())
+    plt.close()
+
+    st.subheader("📊 Daily % Change Distribution (Histogram)")
+    hist_df = daily_returns_pct.drop(columns=["Date"], errors="ignore")
+    fig_hist = px.histogram(hist_df)
+    fig_hist.update_layout({'plot_bgcolor': "white"})
+    st.plotly_chart(fig_hist, use_container_width=True)
+
     # Random allocation
     weights = np.random.random(len(prices.columns))
     weights /= weights.sum()
@@ -268,16 +320,24 @@ if st.session_state.run_analysis:
     scaled_prices = price_scaling(prices)
     scaled_prices["Date"] = scaled_prices.index
     st.subheader("📊 Percentage Change (Scaled)")
-    fig_scaled = px.line(scaled_prices, x="Date", y=scaled_prices.columns[:-1],
-                         title="Scaled Price Change (Base = 1.0)")
+    fig_scaled = px.line(
+        scaled_prices,
+        x="Date",
+        y=scaled_prices.columns[:-1],
+        title="Scaled Price Change (Base = 1.0)"
+    )
     st.plotly_chart(fig_scaled, use_container_width=True)
 
     # Actual prices
     st.subheader("📈 Price Movement (Actual)")
     raw_prices = prices.copy()
     raw_prices["Date"] = raw_prices.index
-    fig_raw = px.line(raw_prices, x="Date", y=raw_prices.columns[:-1],
-                      title="Actual Prices")
+    fig_raw = px.line(
+        raw_prices,
+        x="Date",
+        y=raw_prices.columns[:-1],
+        title="Actual Prices"
+    )
     st.plotly_chart(fig_raw, use_container_width=True)
 
     # Portfolio value over time
@@ -295,7 +355,7 @@ if st.session_state.run_analysis:
         cov = returns.cov() * 252
         sim_results = []
         weight_list = []
-        for _ in range(num_sims):
+        for _ in range(int(num_sims)):
             w = np.random.random(len(prices.columns))
             w /= w.sum()
             weight_list.append(w)
@@ -309,10 +369,14 @@ if st.session_state.run_analysis:
         best_return = sim_df.loc[best_idx, "Return"]
         best_vol = sim_df.loc[best_idx, "Volatility"]
 
-        fig_mc = px.scatter(sim_df, x="Volatility", y="Return", color="Sharpe",
-                            title="Monte Carlo Portfolios")
-        fig_mc.add_scatter(x=[best_vol], y=[best_return], mode="markers",
-                           marker=dict(size=15, color="red"), name="Best Sharpe")
+        fig_mc = px.scatter(sim_df, x="Volatility", y="Return", color="Sharpe", title="Monte Carlo Portfolios")
+        fig_mc.add_scatter(
+            x=[best_vol],
+            y=[best_return],
+            mode="markers",
+            marker=dict(size=15, color="red"),
+            name="Best Sharpe"
+        )
         st.plotly_chart(fig_mc, use_container_width=True)
 
         st.subheader("Optimal Weights (Max Sharpe)")
@@ -420,4 +484,3 @@ if st.session_state.run_analysis:
 
 else:
     st.info("Select assets / adjust inputs → graphs update automatically.")
-
