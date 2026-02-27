@@ -1,10 +1,6 @@
 # pages/3D_Charts.py
+# ✅ FIXED: handles yfinance MultiIndex / DataFrame columns (Close becomes Series)
 # 3D Stock "Money Cloud" Visualizer (Time-Price-Pressure)
-# X = Time index
-# Y = Price (or log price)
-# Z = "Pressure" variable (volatility / volume shock / RSI / drawdown)
-#
-# Works with Indian tickers like RELIANCE.NS
 
 import streamlit as st
 import yfinance as yf
@@ -18,11 +14,37 @@ st.title("🧭 3D Stock Visualizer — Time × Price × Pressure")
 # -----------------------------
 # Helpers
 # -----------------------------
-def safe_series(s: pd.Series) -> pd.Series:
+def _to_series(x) -> pd.Series:
+    """Convert x to a 1D Series safely (handles DataFrame single column)."""
+    if x is None:
+        return pd.Series(dtype=float)
+    if isinstance(x, pd.Series):
+        return x
+    if isinstance(x, pd.DataFrame):
+        # If DataFrame has one column, squeeze it to Series
+        if x.shape[1] == 1:
+            return x.iloc[:, 0]
+        # If multiple columns, try common patterns (Close / Adj Close)
+        for col in ["Close", "Adj Close"]:
+            if col in x.columns:
+                s = x[col]
+                if isinstance(s, pd.DataFrame) and s.shape[1] == 1:
+                    return s.iloc[:, 0]
+                if isinstance(s, pd.Series):
+                    return s
+        # fallback: first column
+        return x.iloc[:, 0]
+    # numpy / list-like
+    return pd.Series(x)
+
+def safe_series(x) -> pd.Series:
+    s = _to_series(x)
     s = pd.to_numeric(s, errors="coerce")
-    return s.replace([np.inf, -np.inf], np.nan)
+    s = s.replace([np.inf, -np.inf], np.nan)
+    return s
 
 def rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    close = safe_series(close)
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -33,18 +55,38 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return out
 
 def zscore(x: pd.Series, window: int = 20) -> pd.Series:
+    x = safe_series(x)
     mu = x.rolling(window).mean()
     sd = x.rolling(window).std()
     return (x - mu) / sd
 
 @st.cache_data(ttl=900, show_spinner=False)
 def load_ohlcv(ticker: str, period: str) -> pd.DataFrame:
-    df = yf.download(ticker, period=period, auto_adjust=False, progress=False)
+    df = yf.download(ticker, period=period, auto_adjust=False, progress=False, group_by="column")
     if df is None or df.empty:
         return pd.DataFrame()
-    df = df.dropna()
+    df = df.dropna(how="all")
     df.index = pd.to_datetime(df.index)
+
+    # If MultiIndex columns appear, flatten them:
+    # Example: ('Close', 'RELIANCE.NS') -> 'Close'
+    if isinstance(df.columns, pd.MultiIndex):
+        # Prefer first level names like Open/High/Low/Close/Volume
+        df.columns = [c[0] for c in df.columns]
+
     return df
+
+def pick_col(df: pd.DataFrame, name: str) -> pd.Series:
+    """Get a column as Series robustly."""
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    if name in df.columns:
+        return safe_series(df[name])
+    # Try case variations
+    for c in df.columns:
+        if str(c).strip().lower() == name.lower():
+            return safe_series(df[c])
+    return pd.Series(dtype=float)
 
 # -----------------------------
 # Sidebar controls
@@ -90,33 +132,38 @@ if df.empty:
     st.error("No data returned. Check ticker (e.g., RELIANCE.NS) or try a different period.")
     st.stop()
 
-# Basic series
-close = safe_series(df["Close"])
-volume = safe_series(df.get("Volume", pd.Series(index=df.index, dtype=float)))
+close = pick_col(df, "Close")
+volume = pick_col(df, "Volume")
 
-rets = close.pct_change() * 100
-rets = safe_series(rets)
+if close.empty:
+    st.error("Could not read Close prices from Yahoo Finance response for this ticker.")
+    st.stop()
+
+rets = safe_series(close.pct_change() * 100)
 
 # Y axis choice
 if y_mode == "Log Close":
-    y = np.log(close)
+    y = safe_series(np.log(close))
     y_label = "Log(Close)"
 else:
-    y = close
+    y = safe_series(close)
     y_label = "Close"
-
-y = safe_series(pd.Series(y, index=df.index))
 
 # Compute pressure Z
 if pressure_mode.startswith("Rolling Volatility"):
-    # annualized volatility from daily returns (close-to-close)
     vol = close.pct_change().rolling(21).std() * np.sqrt(252) * 100
     z = safe_series(vol)
     z_label = "Volatility % (ann.)"
 
 elif pressure_mode.startswith("Volume Z-Score"):
-    z = safe_series(zscore(volume, 20))
-    z_label = "Volume Z"
+    if volume.empty:
+        st.warning("Volume not available for this ticker. Switching Z-axis to Rolling Volatility.")
+        vol = close.pct_change().rolling(21).std() * np.sqrt(252) * 100
+        z = safe_series(vol)
+        z_label = "Volatility % (ann.)"
+    else:
+        z = safe_series(zscore(volume, 20))
+        z_label = "Volume Z"
 
 elif pressure_mode.startswith("RSI"):
     z = safe_series(rsi(close, 14))
@@ -138,12 +185,11 @@ plot_df = pd.DataFrame({
 }, index=df.index).dropna()
 
 if plot_df.empty:
-    st.warning("Not enough data to compute selected indicators. Try a longer period (e.g., 2y).")
+    st.warning("Not enough data to compute selected indicators. Try a longer period (e.g., 2y or 5y).")
     st.stop()
 
-# X axis: numeric time index (Plotly 3D prefers numbers)
 plot_df = plot_df.reset_index().rename(columns={"index": "Date"})
-plot_df["t"] = np.arange(len(plot_df))  # 0..N-1
+plot_df["t"] = np.arange(len(plot_df))  # numeric time index
 
 # Color scale source
 if color_mode == "Daily Return %":
@@ -157,6 +203,13 @@ else:
 # 3D Plot
 # -----------------------------
 fig = go.Figure()
+
+customdata = np.stack([
+    plot_df["Date"].dt.strftime("%Y-%m-%d"),
+    plot_df["Y"].to_numpy(),
+    plot_df["Z"].to_numpy(),
+    plot_df["Ret%"].to_numpy(),
+], axis=1)
 
 if show_line:
     fig.add_trace(go.Scatter3d(
@@ -173,12 +226,7 @@ if show_line:
             "Ret%: %{customdata[3]:.2f}%<br>"
             "<extra></extra>"
         ),
-        customdata=np.stack([
-            plot_df["Date"].dt.strftime("%Y-%m-%d"),
-            plot_df["Y"],
-            plot_df["Z"],
-            plot_df["Ret%"],
-        ], axis=1)
+        customdata=customdata
     ))
 
 if show_points:
@@ -188,7 +236,13 @@ if show_points:
         z=plot_df["Z"],
         mode="markers",
         name="Points",
-        marker=dict(size=point_size, color=c, colorscale="Viridis", showscale=True, colorbar=dict(title=c_label)),
+        marker=dict(
+            size=point_size,
+            color=c,
+            colorscale="Viridis",
+            showscale=True,
+            colorbar=dict(title=c_label)
+        ),
         hovertemplate=(
             "Date: %{customdata[0]}<br>"
             f"{y_label}: %{customdata[1]:.4f}<br>"
@@ -196,12 +250,7 @@ if show_points:
             "Ret%: %{customdata[3]:.2f}%<br>"
             "<extra></extra>"
         ),
-        customdata=np.stack([
-            plot_df["Date"].dt.strftime("%Y-%m-%d"),
-            plot_df["Y"],
-            plot_df["Z"],
-            plot_df["Ret%"],
-        ], axis=1)
+        customdata=customdata
     ))
 
 fig.update_layout(
@@ -218,30 +267,17 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------
-# “Low pressure zone” hint box (tradable interpretation)
+# Interpretation hint
 # -----------------------------
 st.markdown("## 🧠 Interpreting 'Low Pressure Zones'")
 if pressure_mode.startswith("Rolling Volatility"):
-    st.write(
-        "Low pressure = **volatility compression**. "
-        "When Z (vol) is low and price starts moving up, it often signals a breakout regime."
-    )
+    st.write("Low pressure = **volatility compression** (quiet regime). Expansion often follows.")
 elif pressure_mode.startswith("Volume Z-Score"):
-    st.write(
-        "Low pressure = **low attention / low participation**. "
-        "When volume is unusually low (negative Z-score) and later spikes, it can mark accumulation → expansion."
-    )
+    st.write("Low pressure = **low participation**. Watch for volume spike + price break.")
 elif pressure_mode.startswith("RSI"):
-    st.write(
-        "Low pressure = **weak momentum** (low RSI). "
-        "Momentum rising from low RSI can act like pressure building and releasing."
-    )
+    st.write("Low pressure = **weak momentum**. Pressure builds when RSI rises from low values.")
 else:
-    st.write(
-        "Low pressure = **deep drawdown** (pain). "
-        "Mean reversion often starts when drawdown stabilizes and volatility falls."
-    )
+    st.write("Low pressure = **deep drawdown** (pain). Reversion often starts when drawdown stabilizes.")
 
-# Small data preview
 with st.expander("Show computed data (last 10 rows)"):
     st.dataframe(plot_df.tail(10), use_container_width=True)
