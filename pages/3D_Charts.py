@@ -1,93 +1,57 @@
 # pages/3D_Charts.py
 # 3D Stock "Money Cloud" Visualizer (Time-Price-Pressure)
-# ✅ Fully fixed hovertemplate (no format / no f-string conflict)
 
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import os
 
 st.set_page_config(page_title="3D Stock Visualizer", layout="wide")
 st.title("🧭 3D Stock Visualizer — Time × Price × Pressure")
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def _to_series(x) -> pd.Series:
-    if x is None:
-        return pd.Series(dtype=float)
-    if isinstance(x, pd.Series):
-        return x
-    if isinstance(x, pd.DataFrame):
-        if x.shape[1] == 1:
-            return x.iloc[:, 0]
-        for col in ["Close", "Adj Close"]:
-            if col in x.columns:
-                s = x[col]
-                if isinstance(s, pd.DataFrame) and s.shape[1] == 1:
-                    return s.iloc[:, 0]
-                if isinstance(s, pd.Series):
-                    return s
-        return x.iloc[:, 0]
-    return pd.Series(x)
+# -------------------------------------------------
+# Load NSE Equity Master from data folder
+# -------------------------------------------------
+@st.cache_data
+def load_equity_master():
+    base_path = os.path.dirname(os.path.dirname(__file__))
+    file_path = os.path.join(base_path, "data", "EQUITY_L.csv")
 
-def safe_series(x) -> pd.Series:
-    s = _to_series(x)
-    s = pd.to_numeric(s, errors="coerce")
-    s = s.replace([np.inf, -np.inf], np.nan)
-    return s
+    if not os.path.exists(file_path):
+        st.error(f"EQUITY_L.csv not found at: {file_path}")
+        st.stop()
 
-def rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    close = safe_series(close)
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def zscore(x: pd.Series, window: int = 20) -> pd.Series:
-    x = safe_series(x)
-    mu = x.rolling(window).mean()
-    sd = x.rolling(window).std()
-    return (x - mu) / sd
-
-@st.cache_data(ttl=900, show_spinner=False)
-def load_ohlcv(ticker: str, period: str) -> pd.DataFrame:
-    df = yf.download(ticker, period=period, auto_adjust=False, progress=False)
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    df = df.dropna(how="all")
-    df.index = pd.to_datetime(df.index)
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-
+    df = pd.read_csv(file_path)
+    df = df.dropna(subset=["SYMBOL"])
+    df["Ticker"] = df["SYMBOL"].astype(str) + ".NS"
     return df
 
-def pick_col(df: pd.DataFrame, name: str) -> pd.Series:
-    if df is None or df.empty:
-        return pd.Series(dtype=float)
-    if name in df.columns:
-        return safe_series(df[name])
-    for c in df.columns:
-        if str(c).strip().lower() == name.lower():
-            return safe_series(df[c])
-    return pd.Series(dtype=float)
+equity_df = load_equity_master()
 
-# -----------------------------
-# Sidebar
-# -----------------------------
+# -------------------------------------------------
+# Sidebar Inputs
+# -------------------------------------------------
 with st.sidebar:
     st.header("Inputs")
 
-    ticker = st.text_input("Ticker", "RELIANCE.NS").strip().upper()
-    period = st.selectbox("Lookback Period", ["6mo", "1y", "2y", "5y"], index=1)
+    ticker = st.selectbox(
+        "Select Ticker",
+        options=sorted(equity_df["Ticker"].unique())
+    )
 
-    y_mode = st.selectbox("Y-Axis", ["Close Price", "Log Close"], index=0)
+    period = st.selectbox(
+        "Lookback Period",
+        ["6mo", "1y", "2y", "5y"],
+        index=1
+    )
+
+    y_mode = st.selectbox(
+        "Y-Axis",
+        ["Close Price", "Log Close"],
+        index=0
+    )
 
     pressure_mode = st.selectbox(
         "Z-Axis (Pressure Variable)",
@@ -101,6 +65,7 @@ with st.sidebar:
     )
 
     st.markdown("---")
+
     line_width = st.slider("3D Line Width", 1, 10, 4)
     point_size = st.slider("Point Size", 1, 8, 3)
 
@@ -113,95 +78,96 @@ with st.sidebar:
         index=0
     )
 
-# -----------------------------
-# Load data
-# -----------------------------
+# -------------------------------------------------
+# Helper Functions
+# -------------------------------------------------
+def rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+@st.cache_data(ttl=900)
+def load_ohlcv(ticker, period):
+    df = yf.download(ticker, period=period, progress=False)
+    return df
+
+# -------------------------------------------------
+# Load Stock Data
+# -------------------------------------------------
 df = load_ohlcv(ticker, period)
 
 if df.empty:
-    st.error("No data returned. Check ticker (e.g., RELIANCE.NS) or try another period.")
+    st.error("No data found for selected ticker.")
     st.stop()
 
-close = pick_col(df, "Close")
-volume = pick_col(df, "Volume")
+close = df["Close"]
+volume = df["Volume"]
+returns = close.pct_change() * 100
 
-if close.empty:
-    st.error("Close price not found in Yahoo response.")
-    st.stop()
-
-rets = safe_series(close.pct_change() * 100)
-
-# Y axis
+# Y Axis
 if y_mode == "Log Close":
-    y = safe_series(np.log(close))
+    y = np.log(close)
     y_label = "Log(Close)"
 else:
-    y = safe_series(close)
+    y = close
     y_label = "Close"
 
-# Pressure
+# Z Axis (Pressure Variable)
 if pressure_mode.startswith("Rolling Volatility"):
-    vol = close.pct_change().rolling(21).std() * np.sqrt(252) * 100
-    z = safe_series(vol)
+    z = close.pct_change().rolling(21).std() * np.sqrt(252) * 100
     z_label = "Volatility %"
 
 elif pressure_mode.startswith("Volume Z-Score"):
-    if volume.empty:
-        st.warning("Volume unavailable. Using Volatility instead.")
-        vol = close.pct_change().rolling(21).std() * np.sqrt(252) * 100
-        z = safe_series(vol)
-        z_label = "Volatility %"
-    else:
-        z = safe_series(zscore(volume, 20))
-        z_label = "Volume Z"
+    z = (volume - volume.rolling(20).mean()) / volume.rolling(20).std()
+    z_label = "Volume Z"
 
 elif pressure_mode.startswith("RSI"):
-    z = safe_series(rsi(close, 14))
+    z = rsi(close)
     z_label = "RSI"
 
 else:
-    roll_max = close.rolling(252).max()
-    dd = (close / roll_max - 1.0) * 100
-    z = safe_series(dd)
+    rolling_max = close.rolling(252).max()
+    z = (close / rolling_max - 1) * 100
     z_label = "Drawdown %"
 
 plot_df = pd.DataFrame({
+    "Date": df.index,
     "Y": y,
     "Z": z,
-    "Ret%": rets,
-}, index=df.index).dropna()
+    "Ret%": returns
+}).dropna()
 
-if plot_df.empty:
-    st.warning("Not enough data for selected indicators.")
-    st.stop()
-
-plot_df = plot_df.reset_index().rename(columns={"index": "Date"})
 plot_df["t"] = np.arange(len(plot_df))
 
+# Color Selection
 if color_mode == "Daily Return %":
-    c = plot_df["Ret%"]
-    c_label = "Daily Return %"
+    color_data = plot_df["Ret%"]
+    color_label = "Daily Return %"
 else:
-    c = plot_df["Z"]
-    c_label = z_label
+    color_data = plot_df["Z"]
+    color_label = z_label
 
-# -----------------------------
+# -------------------------------------------------
 # 3D Plot
-# -----------------------------
+# -------------------------------------------------
 fig = go.Figure()
 
 customdata = np.stack([
     plot_df["Date"].dt.strftime("%Y-%m-%d"),
-    plot_df["Y"].to_numpy(),
-    plot_df["Z"].to_numpy(),
-    plot_df["Ret%"].to_numpy(),
+    plot_df["Y"],
+    plot_df["Z"],
+    plot_df["Ret%"],
 ], axis=1)
 
-hover = (
+hover_template = (
     "Date: %{customdata[0]}<br>"
     + y_label + ": %{customdata[1]:.4f}<br>"
     + z_label + ": %{customdata[2]:.4f}<br>"
-    + "Ret%: %{customdata[3]:.2f}%<br>"
+    + "Return: %{customdata[3]:.2f}%<br>"
     + "<extra></extra>"
 )
 
@@ -211,10 +177,10 @@ if show_line:
         y=plot_df["Y"],
         z=plot_df["Z"],
         mode="lines",
-        name="Path",
         line=dict(width=line_width),
-        hovertemplate=hover,
-        customdata=customdata
+        hovertemplate=hover_template,
+        customdata=customdata,
+        name="Path"
     ))
 
 if show_points:
@@ -223,16 +189,16 @@ if show_points:
         y=plot_df["Y"],
         z=plot_df["Z"],
         mode="markers",
-        name="Points",
         marker=dict(
             size=point_size,
-            color=c,
+            color=color_data,
             colorscale="Viridis",
             showscale=True,
-            colorbar=dict(title=c_label)
+            colorbar=dict(title=color_label)
         ),
-        hovertemplate=hover,
-        customdata=customdata
+        hovertemplate=hover_template,
+        customdata=customdata,
+        name="Points"
     ))
 
 fig.update_layout(
@@ -248,19 +214,44 @@ fig.update_layout(
 
 st.plotly_chart(fig, use_container_width=True)
 
-# -----------------------------
-# Interpretation
-# -----------------------------
+# -------------------------------------------------
+# Data Table Section
+# -------------------------------------------------
+st.markdown("## 📊 View Data Table")
+
+row_option = st.selectbox(
+    "Select number of rows to display",
+    ["Last 10", "Last 25", "Last 50", "Last 100", "All Rows"],
+    index=0
+)
+
+if row_option == "Last 10":
+    rows_to_show = 10
+elif row_option == "Last 25":
+    rows_to_show = 25
+elif row_option == "Last 50":
+    rows_to_show = 50
+elif row_option == "Last 100":
+    rows_to_show = 100
+else:
+    rows_to_show = None
+
+with st.expander("Show Data"):
+    if rows_to_show:
+        st.dataframe(plot_df.tail(rows_to_show), use_container_width=True)
+    else:
+        st.dataframe(plot_df, use_container_width=True)
+
+# -------------------------------------------------
+# Interpretation Section
+# -------------------------------------------------
 st.markdown("## 🧠 Interpreting Low Pressure Zones")
 
 if pressure_mode.startswith("Rolling Volatility"):
-    st.write("Low pressure = volatility compression. Expansion often follows.")
+    st.write("Low volatility zones often precede expansion.")
 elif pressure_mode.startswith("Volume Z-Score"):
-    st.write("Low pressure = low participation. Watch for breakout with volume.")
+    st.write("Low volume zones indicate weak participation.")
 elif pressure_mode.startswith("RSI"):
-    st.write("Low pressure = weak momentum. Watch RSI reversal.")
+    st.write("Low RSI suggests oversold conditions.")
 else:
-    st.write("Low pressure = deep drawdown. Reversion often begins after stabilization.")
-
-with st.expander("Show last 10 rows"):
-    st.dataframe(plot_df.tail(10), use_container_width=True)
+    st.write("Large drawdowns may present mean reversion opportunities.")
