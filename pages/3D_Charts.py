@@ -31,7 +31,7 @@ def load_equity_master():
 equity_df = load_equity_master()
 
 # -------------------------------------------------
-# Sidebar Inputs
+# Sidebar
 # -------------------------------------------------
 with st.sidebar:
     st.header("Inputs")
@@ -64,23 +64,14 @@ with st.sidebar:
         index=0
     )
 
-    st.markdown("---")
-
-    line_width = st.slider("3D Line Width", 1, 10, 4)
-    point_size = st.slider("Point Size", 1, 8, 3)
-
-    show_points = st.checkbox("Show points", value=True)
-    show_line = st.checkbox("Show line path", value=True)
-
-    color_mode = st.selectbox(
-        "Color points by",
-        ["Daily Return %", "Pressure (Z)"],
-        index=0
-    )
-
 # -------------------------------------------------
 # Helper Functions
 # -------------------------------------------------
+def to_series(x):
+    if isinstance(x, pd.DataFrame):
+        return x.iloc[:, 0]
+    return x.squeeze()
+
 def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
     gain = delta.clip(lower=0)
@@ -93,6 +84,10 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
 @st.cache_data(ttl=900)
 def load_ohlcv(ticker, period):
     df = yf.download(ticker, period=period, progress=False)
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
     return df
 
 # -------------------------------------------------
@@ -104,8 +99,8 @@ if df.empty:
     st.error("No data found for selected ticker.")
     st.stop()
 
-close = df["Close"]
-volume = df["Volume"]
+close = to_series(df["Close"])
+volume = to_series(df["Volume"])
 returns = close.pct_change() * 100
 
 # Y Axis
@@ -116,7 +111,7 @@ else:
     y = close
     y_label = "Close"
 
-# Z Axis (Pressure Variable)
+# Z Axis
 if pressure_mode.startswith("Rolling Volatility"):
     z = close.pct_change().rolling(21).std() * np.sqrt(252) * 100
     z_label = "Volatility %"
@@ -134,34 +129,27 @@ else:
     z = (close / rolling_max - 1) * 100
     z_label = "Drawdown %"
 
+# Ensure everything is 1D
 plot_df = pd.DataFrame({
     "Date": df.index,
-    "Y": y,
-    "Z": z,
-    "Ret%": returns
+    "Y": to_series(y),
+    "Z": to_series(z),
+    "Ret%": to_series(returns)
 }).dropna()
 
 plot_df["t"] = np.arange(len(plot_df))
-
-# Color Selection
-if color_mode == "Daily Return %":
-    color_data = plot_df["Ret%"]
-    color_label = "Daily Return %"
-else:
-    color_data = plot_df["Z"]
-    color_label = z_label
 
 # -------------------------------------------------
 # 3D Plot
 # -------------------------------------------------
 fig = go.Figure()
 
-customdata = np.stack([
+customdata = np.column_stack((
     plot_df["Date"].dt.strftime("%Y-%m-%d"),
     plot_df["Y"],
     plot_df["Z"],
-    plot_df["Ret%"],
-], axis=1)
+    plot_df["Ret%"]
+))
 
 hover_template = (
     "Date: %{customdata[0]}<br>"
@@ -171,35 +159,15 @@ hover_template = (
     + "<extra></extra>"
 )
 
-if show_line:
-    fig.add_trace(go.Scatter3d(
-        x=plot_df["t"],
-        y=plot_df["Y"],
-        z=plot_df["Z"],
-        mode="lines",
-        line=dict(width=line_width),
-        hovertemplate=hover_template,
-        customdata=customdata,
-        name="Path"
-    ))
-
-if show_points:
-    fig.add_trace(go.Scatter3d(
-        x=plot_df["t"],
-        y=plot_df["Y"],
-        z=plot_df["Z"],
-        mode="markers",
-        marker=dict(
-            size=point_size,
-            color=color_data,
-            colorscale="Viridis",
-            showscale=True,
-            colorbar=dict(title=color_label)
-        ),
-        hovertemplate=hover_template,
-        customdata=customdata,
-        name="Points"
-    ))
+fig.add_trace(go.Scatter3d(
+    x=plot_df["t"],
+    y=plot_df["Y"],
+    z=plot_df["Z"],
+    mode="lines+markers",
+    marker=dict(size=3),
+    hovertemplate=hover_template,
+    customdata=customdata
+))
 
 fig.update_layout(
     height=750,
@@ -215,7 +183,7 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------------------------------
-# Data Table Section
+# Data Table
 # -------------------------------------------------
 st.markdown("## 📊 View Data Table")
 
@@ -225,33 +193,18 @@ row_option = st.selectbox(
     index=0
 )
 
-if row_option == "Last 10":
-    rows_to_show = 10
-elif row_option == "Last 25":
-    rows_to_show = 25
-elif row_option == "Last 50":
-    rows_to_show = 50
-elif row_option == "Last 100":
-    rows_to_show = 100
-else:
-    rows_to_show = None
+rows_map = {
+    "Last 10": 10,
+    "Last 25": 25,
+    "Last 50": 50,
+    "Last 100": 100,
+    "All Rows": None
+}
+
+rows_to_show = rows_map[row_option]
 
 with st.expander("Show Data"):
     if rows_to_show:
         st.dataframe(plot_df.tail(rows_to_show), use_container_width=True)
     else:
         st.dataframe(plot_df, use_container_width=True)
-
-# -------------------------------------------------
-# Interpretation Section
-# -------------------------------------------------
-st.markdown("## 🧠 Interpreting Low Pressure Zones")
-
-if pressure_mode.startswith("Rolling Volatility"):
-    st.write("Low volatility zones often precede expansion.")
-elif pressure_mode.startswith("Volume Z-Score"):
-    st.write("Low volume zones indicate weak participation.")
-elif pressure_mode.startswith("RSI"):
-    st.write("Low RSI suggests oversold conditions.")
-else:
-    st.write("Large drawdowns may present mean reversion opportunities.")
