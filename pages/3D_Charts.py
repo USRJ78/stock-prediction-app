@@ -1,5 +1,6 @@
 # pages/3D_Charts.py
 # ✅ FIXED: handles yfinance MultiIndex / DataFrame columns (Close becomes Series)
+# ✅ FIXED: hovertemplate string formatting (no f-string conflict with Plotly %{...})
 # 3D Stock "Money Cloud" Visualizer (Time-Price-Pressure)
 
 import streamlit as st
@@ -21,10 +22,8 @@ def _to_series(x) -> pd.Series:
     if isinstance(x, pd.Series):
         return x
     if isinstance(x, pd.DataFrame):
-        # If DataFrame has one column, squeeze it to Series
         if x.shape[1] == 1:
             return x.iloc[:, 0]
-        # If multiple columns, try common patterns (Close / Adj Close)
         for col in ["Close", "Adj Close"]:
             if col in x.columns:
                 s = x[col]
@@ -32,9 +31,7 @@ def _to_series(x) -> pd.Series:
                     return s.iloc[:, 0]
                 if isinstance(s, pd.Series):
                     return s
-        # fallback: first column
         return x.iloc[:, 0]
-    # numpy / list-like
     return pd.Series(x)
 
 def safe_series(x) -> pd.Series:
@@ -51,8 +48,7 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
     rs = avg_gain / avg_loss
-    out = 100 - (100 / (1 + rs))
-    return out
+    return 100 - (100 / (1 + rs))
 
 def zscore(x: pd.Series, window: int = 20) -> pd.Series:
     x = safe_series(x)
@@ -65,13 +61,12 @@ def load_ohlcv(ticker: str, period: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, auto_adjust=False, progress=False, group_by="column")
     if df is None or df.empty:
         return pd.DataFrame()
+
     df = df.dropna(how="all")
     df.index = pd.to_datetime(df.index)
 
-    # If MultiIndex columns appear, flatten them:
-    # Example: ('Close', 'RELIANCE.NS') -> 'Close'
+    # Flatten MultiIndex if present: ('Close','RELIANCE.NS') -> 'Close'
     if isinstance(df.columns, pd.MultiIndex):
-        # Prefer first level names like Open/High/Low/Close/Volume
         df.columns = [c[0] for c in df.columns]
 
     return df
@@ -82,7 +77,6 @@ def pick_col(df: pd.DataFrame, name: str) -> pd.Series:
         return pd.Series(dtype=float)
     if name in df.columns:
         return safe_series(df[name])
-    # Try case variations
     for c in df.columns:
         if str(c).strip().lower() == name.lower():
             return safe_series(df[c])
@@ -117,11 +111,7 @@ with st.sidebar:
     show_points = st.checkbox("Show points", value=True)
     show_line = st.checkbox("Show line path", value=True)
 
-    color_mode = st.selectbox(
-        "Color points by",
-        ["Daily Return %", "Pressure (Z)"],
-        index=0
-    )
+    color_mode = st.selectbox("Color points by", ["Daily Return %", "Pressure (Z)"], index=0)
 
 # -----------------------------
 # Load data
@@ -157,7 +147,7 @@ if pressure_mode.startswith("Rolling Volatility"):
 
 elif pressure_mode.startswith("Volume Z-Score"):
     if volume.empty:
-        st.warning("Volume not available for this ticker. Switching Z-axis to Rolling Volatility.")
+        st.warning("Volume not available. Switching Z-axis to Rolling Volatility.")
         vol = close.pct_change().rolling(21).std() * np.sqrt(252) * 100
         z = safe_series(vol)
         z_label = "Volatility % (ann.)"
@@ -176,20 +166,17 @@ else:  # Drawdown
     z_label = "Drawdown %"
 
 # Combine and drop NaNs from indicators
-plot_df = pd.DataFrame({
-    "Close": close,
-    "Y": y,
-    "Z": z,
-    "Ret%": rets,
-    "Volume": volume
-}, index=df.index).dropna()
+plot_df = pd.DataFrame(
+    {"Close": close, "Y": y, "Z": z, "Ret%": rets, "Volume": volume},
+    index=df.index
+).dropna()
 
 if plot_df.empty:
     st.warning("Not enough data to compute selected indicators. Try a longer period (e.g., 2y or 5y).")
     st.stop()
 
 plot_df = plot_df.reset_index().rename(columns={"index": "Date"})
-plot_df["t"] = np.arange(len(plot_df))  # numeric time index
+plot_df["t"] = np.arange(len(plot_df))
 
 # Color scale source
 if color_mode == "Daily Return %":
@@ -199,59 +186,63 @@ else:
     c = plot_df["Z"]
     c_label = z_label
 
+# Hover template (✅ safe: uses .format and escaped braces)
+hover = (
+    "Date: %{customdata[0]}<br>"
+    "{y_label}: %{{customdata[1]:.4f}}<br>"
+    "{z_label}: %{{customdata[2]:.4f}}<br>"
+    "Ret%: %{{customdata[3]:.2f}}%<br>"
+    "<extra></extra>"
+).format(y_label=y_label, z_label=z_label)
+
 # -----------------------------
 # 3D Plot
 # -----------------------------
 fig = go.Figure()
 
-customdata = np.stack([
-    plot_df["Date"].dt.strftime("%Y-%m-%d"),
-    plot_df["Y"].to_numpy(),
-    plot_df["Z"].to_numpy(),
-    plot_df["Ret%"].to_numpy(),
-], axis=1)
+customdata = np.stack(
+    [
+        plot_df["Date"].dt.strftime("%Y-%m-%d"),
+        plot_df["Y"].to_numpy(),
+        plot_df["Z"].to_numpy(),
+        plot_df["Ret%"].to_numpy(),
+    ],
+    axis=1
+)
 
 if show_line:
-    fig.add_trace(go.Scatter3d(
-        x=plot_df["t"],
-        y=plot_df["Y"],
-        z=plot_df["Z"],
-        mode="lines",
-        name="Path",
-        line=dict(width=line_width),
-        hovertemplate=(
-            "Date: %{customdata[0]}<br>"
-            f"{y_label}: %{customdata[1]:.4f}<br>"
-            f"{z_label}: %{customdata[2]:.4f}<br>"
-            "Ret%: %{customdata[3]:.2f}%<br>"
-            "<extra></extra>"
-        ),
-        customdata=customdata
-    ))
+    fig.add_trace(
+        go.Scatter3d(
+            x=plot_df["t"],
+            y=plot_df["Y"],
+            z=plot_df["Z"],
+            mode="lines",
+            name="Path",
+            line=dict(width=line_width),
+            hovertemplate=hover,
+            customdata=customdata,
+        )
+    )
 
 if show_points:
-    fig.add_trace(go.Scatter3d(
-        x=plot_df["t"],
-        y=plot_df["Y"],
-        z=plot_df["Z"],
-        mode="markers",
-        name="Points",
-        marker=dict(
-            size=point_size,
-            color=c,
-            colorscale="Viridis",
-            showscale=True,
-            colorbar=dict(title=c_label)
-        ),
-        hovertemplate=(
-            "Date: %{customdata[0]}<br>"
-            f"{y_label}: %{customdata[1]:.4f}<br>"
-            f"{z_label}: %{customdata[2]:.4f}<br>"
-            "Ret%: %{customdata[3]:.2f}%<br>"
-            "<extra></extra>"
-        ),
-        customdata=customdata
-    ))
+    fig.add_trace(
+        go.Scatter3d(
+            x=plot_df["t"],
+            y=plot_df["Y"],
+            z=plot_df["Z"],
+            mode="markers",
+            name="Points",
+            marker=dict(
+                size=point_size,
+                color=c,
+                colorscale="Viridis",
+                showscale=True,
+                colorbar=dict(title=c_label),
+            ),
+            hovertemplate=hover,
+            customdata=customdata,
+        )
+    )
 
 fig.update_layout(
     height=750,
@@ -259,9 +250,9 @@ fig.update_layout(
     scene=dict(
         xaxis_title="Time Index (old → new)",
         yaxis_title=y_label,
-        zaxis_title=z_label
+        zaxis_title=z_label,
     ),
-    margin=dict(l=0, r=0, t=50, b=0)
+    margin=dict(l=0, r=0, t=50, b=0),
 )
 
 st.plotly_chart(fig, use_container_width=True)
