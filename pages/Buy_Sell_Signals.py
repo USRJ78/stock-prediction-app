@@ -8,9 +8,9 @@ st.set_page_config(page_title="Buy Sell Signals", layout="wide")
 
 st.title("📈 Buy / Sell Signal Charts")
 
-# ---------------------------
+# -------------------------
 # LOAD TICKERS
-# ---------------------------
+# -------------------------
 @st.cache_data
 def load_tickers():
     df = pd.read_csv("data/EQUITY_L.csv")
@@ -18,19 +18,19 @@ def load_tickers():
 
 tickers = load_tickers()
 
-# ---------------------------
-# SIDEBAR SETTINGS
-# ---------------------------
+# -------------------------
+# SIDEBAR
+# -------------------------
 st.sidebar.header("Chart Settings")
 
-ticker = st.sidebar.selectbox("Select Stock", tickers)
+ticker = st.sidebar.selectbox("Stock", tickers)
 
 timeframe = st.sidebar.selectbox(
     "Timeframe",
-    ["1mo","3mo","6mo","1y","2y","5y"]
+    ["1mo","3mo","6mo","1y","2y","5y","4h"]
 )
 
-rows = st.sidebar.slider("Rows to Display", 50, 500, 200)
+rows = st.sidebar.slider("Rows to Display",50,500,200)
 
 strategy = st.sidebar.selectbox(
     "Signal Strategy",
@@ -48,22 +48,20 @@ dimension = st.sidebar.selectbox(
 )
 
 z_axis = st.sidebar.selectbox(
-    "3D Z Axis Variable",
+    "3D Axis Variable",
     ["Close","Volatility","Returns","Volume","Momentum"]
 )
 
-# ---------------------------
+# -------------------------
 # DOWNLOAD DATA
-# ---------------------------
+# -------------------------
 symbol = ticker + ".NS"
 
-df = yf.download(symbol, period=timeframe)
+if timeframe == "4h":
+    df = yf.download(symbol, interval="4h", period="60d")
+else:
+    df = yf.download(symbol, period=timeframe)
 
-if df.empty:
-    st.error("No data found")
-    st.stop()
-
-# Fix multiindex columns
 if isinstance(df.columns, pd.MultiIndex):
     df.columns = df.columns.get_level_values(0)
 
@@ -73,18 +71,16 @@ df = df.tail(rows)
 
 df.reset_index(inplace=True)
 
-# ---------------------------
+# -------------------------
 # EXTRA METRICS
-# ---------------------------
+# -------------------------
 df["Returns"] = df["Close"].pct_change()
-
 df["Volatility"] = df["Returns"].rolling(10).std()
-
 df["Momentum"] = df["Close"] - df["Close"].shift(10)
 
-# ---------------------------
-# GOLDEN CROSS SIGNAL
-# ---------------------------
+# -------------------------
+# GOLDEN CROSS
+# -------------------------
 if strategy == "Golden Cross":
 
     df["SMA20"] = df["Close"].rolling(20).mean()
@@ -98,37 +94,55 @@ if strategy == "Golden Cross":
     buy = df[df["Position"] == 1]
     sell = df[df["Position"] == -1]
 
-# ---------------------------
-# UT BOT SIGNAL
-# ---------------------------
+# -------------------------
+# TRUE UT BOT ALERTS
+# -------------------------
 else:
 
-    atr_period = 10
-    multiplier = 1
+    atr_period = 1
+    key_value = 2
 
     df["H-L"] = df["High"] - df["Low"]
     df["H-PC"] = abs(df["High"] - df["Close"].shift())
     df["L-PC"] = abs(df["Low"] - df["Close"].shift())
 
-    tr = df[["H-L","H-PC","L-PC"]].max(axis=1)
+    df["TR"] = df[["H-L","H-PC","L-PC"]].max(axis=1)
 
-    atr = tr.rolling(atr_period).mean()
+    df["ATR"] = df["TR"].rolling(atr_period).mean()
 
-    df["upper"] = df["Close"] - multiplier * atr
-    df["lower"] = df["Close"] + multiplier * atr
+    nLoss = key_value * df["ATR"]
 
-    df["trend"] = 0
-    df.loc[df["Close"] > df["upper"],"trend"] = 1
-    df.loc[df["Close"] < df["lower"],"trend"] = -1
+    trailing_stop = [df["Close"][0]]
 
-    df["trend_shift"] = df["trend"].diff()
+    for i in range(1,len(df)):
 
-    buy = df[df["trend_shift"] == 2]
-    sell = df[df["trend_shift"] == -2]
+        prev_stop = trailing_stop[i-1]
 
-# ---------------------------
+        if df["Close"][i] > prev_stop and df["Close"][i-1] > prev_stop:
+            trailing_stop.append(max(prev_stop, df["Close"][i] - nLoss[i]))
+
+        elif df["Close"][i] < prev_stop and df["Close"][i-1] < prev_stop:
+            trailing_stop.append(min(prev_stop, df["Close"][i] + nLoss[i]))
+
+        elif df["Close"][i] > prev_stop:
+            trailing_stop.append(df["Close"][i] - nLoss[i])
+
+        else:
+            trailing_stop.append(df["Close"][i] + nLoss[i])
+
+    df["UT_Stop"] = trailing_stop
+
+    df["Signal"] = 0
+
+    df.loc[(df["Close"] > df["UT_Stop"]) & (df["Close"].shift() <= df["UT_Stop"].shift()),"Signal"] = 1
+    df.loc[(df["Close"] < df["UT_Stop"]) & (df["Close"].shift() >= df["UT_Stop"].shift()),"Signal"] = -1
+
+    buy = df[df["Signal"] == 1]
+    sell = df[df["Signal"] == -1]
+
+# -------------------------
 # 2D CHART
-# ---------------------------
+# -------------------------
 if dimension == "2D":
 
     fig = go.Figure()
@@ -157,60 +171,42 @@ if dimension == "2D":
             )
         )
 
-    # SMA lines if Golden Cross
     if strategy == "Golden Cross":
 
-        fig.add_trace(
-            go.Scatter(
-                x=df["Date"],
-                y=df["SMA20"],
-                mode="lines",
-                name="SMA20"
-            )
-        )
+        fig.add_trace(go.Scatter(x=df["Date"],y=df["SMA20"],mode="lines",name="SMA20"))
+        fig.add_trace(go.Scatter(x=df["Date"],y=df["SMA50"],mode="lines",name="SMA50"))
 
-        fig.add_trace(
-            go.Scatter(
-                x=df["Date"],
-                y=df["SMA50"],
-                mode="lines",
-                name="SMA50"
-            )
-        )
+    if strategy == "UT Bot":
 
-    # BUY markers
+        fig.add_trace(go.Scatter(x=df["Date"],y=df["UT_Stop"],mode="lines",name="UT Stop"))
+
     fig.add_trace(
         go.Scatter(
             x=buy["Date"],
             y=buy["Close"],
             mode="markers",
-            marker=dict(symbol="triangle-up", size=12, color="green"),
+            marker=dict(symbol="triangle-up",size=12,color="green"),
             name="Buy"
         )
     )
 
-    # SELL markers
     fig.add_trace(
         go.Scatter(
             x=sell["Date"],
             y=sell["Close"],
             mode="markers",
-            marker=dict(symbol="triangle-down", size=12, color="red"),
+            marker=dict(symbol="triangle-down",size=12,color="red"),
             name="Sell"
         )
     )
 
-    fig.update_layout(
-        height=700,
-        xaxis_title="Date",
-        yaxis_title="Price"
-    )
+    fig.update_layout(height=700)
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig,use_container_width=True)
 
-# ---------------------------
+# -------------------------
 # 3D CHART
-# ---------------------------
+# -------------------------
 else:
 
     z = df[z_axis]
@@ -233,7 +229,7 @@ else:
             y=buy["Close"],
             z=buy[z_axis],
             mode="markers",
-            marker=dict(size=6, color="green"),
+            marker=dict(size=6,color="green"),
             name="Buy"
         )
     )
@@ -244,7 +240,7 @@ else:
             y=sell["Close"],
             z=sell[z_axis],
             mode="markers",
-            marker=dict(size=6, color="red"),
+            marker=dict(size=6,color="red"),
             name="Sell"
         )
     )
@@ -258,14 +254,14 @@ else:
         )
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig,use_container_width=True)
 
-# ---------------------------
+# -------------------------
 # SIGNAL TABLE
-# ---------------------------
+# -------------------------
 st.subheader("Recent Signals")
 
-signals = pd.concat([buy, sell]).sort_values("Date")
+signals = pd.concat([buy,sell]).sort_values("Date")
 
 if not signals.empty:
 
@@ -277,5 +273,4 @@ if not signals.empty:
     st.dataframe(signals.tail(20))
 
 else:
-
-    st.info("No signals generated.")
+    st.info("No signals generated")
