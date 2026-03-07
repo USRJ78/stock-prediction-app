@@ -19,11 +19,11 @@ def load_tickers():
 tickers = load_tickers()
 
 # ---------------------------
-# SIDEBAR
+# SIDEBAR SETTINGS
 # ---------------------------
 st.sidebar.header("Chart Settings")
 
-ticker = st.sidebar.selectbox("Stock", tickers)
+ticker = st.sidebar.selectbox("Select Stock", tickers)
 
 timeframe = st.sidebar.selectbox(
     "Timeframe",
@@ -49,7 +49,7 @@ dimension = st.sidebar.selectbox(
 
 z_axis = st.sidebar.selectbox(
     "3D Z Axis Variable",
-    ["Close","Volatility","Returns"]
+    ["Close","Volatility","Returns","Volume","Momentum"]
 )
 
 # ---------------------------
@@ -60,10 +60,10 @@ symbol = ticker + ".NS"
 df = yf.download(symbol, period=timeframe)
 
 if df.empty:
-    st.error("No data available")
+    st.error("No data found")
     st.stop()
 
-# fix multi index
+# Fix multiindex columns
 if isinstance(df.columns, pd.MultiIndex):
     df.columns = df.columns.get_level_values(0)
 
@@ -76,13 +76,14 @@ df.reset_index(inplace=True)
 # ---------------------------
 # EXTRA METRICS
 # ---------------------------
-
 df["Returns"] = df["Close"].pct_change()
 
 df["Volatility"] = df["Returns"].rolling(10).std()
 
+df["Momentum"] = df["Close"] - df["Close"].shift(10)
+
 # ---------------------------
-# GOLDEN CROSS
+# GOLDEN CROSS SIGNAL
 # ---------------------------
 if strategy == "Golden Cross":
 
@@ -98,7 +99,7 @@ if strategy == "Golden Cross":
     sell = df[df["Position"] == -1]
 
 # ---------------------------
-# UT BOT
+# UT BOT SIGNAL
 # ---------------------------
 else:
 
@@ -107,7 +108,7 @@ else:
 
     df["H-L"] = df["High"] - df["Low"]
     df["H-PC"] = abs(df["High"] - df["Close"].shift())
-    df["L-PC"] = abs(df["Low"] - df["Close"].shift()])
+    df["L-PC"] = abs(df["Low"] - df["Close"].shift())
 
     tr = df[["H-L","H-PC","L-PC"]].max(axis=1)
 
@@ -152,11 +153,11 @@ if dimension == "2D":
                 x=df["Date"],
                 y=df["Close"],
                 mode="lines",
-                name="Close"
+                name="Close Price"
             )
         )
 
-    # SMA lines (Golden Cross only)
+    # SMA lines if Golden Cross
     if strategy == "Golden Cross":
 
         fig.add_trace(
@@ -177,7 +178,7 @@ if dimension == "2D":
             )
         )
 
-    # BUY
+    # BUY markers
     fig.add_trace(
         go.Scatter(
             x=buy["Date"],
@@ -188,7 +189,7 @@ if dimension == "2D":
         )
     )
 
-    # SELL
+    # SELL markers
     fig.add_trace(
         go.Scatter(
             x=sell["Date"],
@@ -199,7 +200,11 @@ if dimension == "2D":
         )
     )
 
-    fig.update_layout(height=700)
+    fig.update_layout(
+        height=700,
+        xaxis_title="Date",
+        yaxis_title="Price"
+    )
 
     st.plotly_chart(fig, use_container_width=True)
 
@@ -207,8 +212,6 @@ if dimension == "2D":
 # 3D CHART
 # ---------------------------
 else:
-
-    df["Index3D"] = np.arange(len(df))
 
     z = df[z_axis]
 
@@ -260,7 +263,6 @@ else:
 # ---------------------------
 # SIGNAL TABLE
 # ---------------------------
-
 st.subheader("Recent Signals")
 
 signals = pd.concat([buy, sell]).sort_values("Date")
