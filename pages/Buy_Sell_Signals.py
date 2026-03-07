@@ -4,7 +4,7 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Buy / Sell Signals", layout="wide")
+st.set_page_config(page_title="Buy Sell Signals", layout="wide")
 
 st.title("📈 Buy / Sell Signal Charts")
 
@@ -14,7 +14,7 @@ st.title("📈 Buy / Sell Signal Charts")
 @st.cache_data
 def load_tickers():
     df = pd.read_csv("data/EQUITY_L.csv")
-    return df["SYMBOL"].dropna().unique().tolist()
+    return df["SYMBOL"].dropna().tolist()
 
 tickers = load_tickers()
 
@@ -30,15 +30,15 @@ timeframe = st.sidebar.selectbox(
     ["1mo","3mo","6mo","1y","2y","5y"]
 )
 
-rows = st.sidebar.slider("Number of rows to display",50,500,200)
+rows = st.sidebar.slider("Rows to display",50,500,200)
 
-signal_type = st.sidebar.selectbox(
+strategy = st.sidebar.selectbox(
     "Signal Strategy",
     ["Golden Cross","UT Bot"]
 )
 
 chart_type = st.sidebar.selectbox(
-    "Chart Style",
+    "Chart Type",
     ["Line","Candlestick"]
 )
 
@@ -56,52 +56,50 @@ df = yf.download(symbol, period=timeframe)
 
 df = df.dropna()
 
+df = df.tail(rows).copy()
+
+# reset index for 3D stability
+df.reset_index(inplace=True)
+
 # -----------------------------
 # SIGNAL CALCULATIONS
 # -----------------------------
+if strategy == "Golden Cross":
 
-data = df.copy()
+    df["SMA20"] = df["Close"].rolling(20).mean()
+    df["SMA50"] = df["Close"].rolling(50).mean()
 
-# GOLDEN CROSS
-if signal_type == "Golden Cross":
+    df["signal"] = 0
+    df.loc[df["SMA20"] > df["SMA50"],"signal"] = 1
 
-    data["20_SMA"] = data["Close"].rolling(20).mean()
-    data["50_SMA"] = data["Close"].rolling(50).mean()
+    df["position"] = df["signal"].diff()
 
-    data["Signal"] = 0
-    data.loc[data["20_SMA"] > data["50_SMA"],"Signal"] = 1
-    data["Position"] = data["Signal"].diff()
+    buy = df[df["position"] == 1]
+    sell = df[df["position"] == -1]
 
-    buy = data[data["Position"] == 1]
-    sell = data[data["Position"] == -1]
-
-# UT BOT
 else:
 
     atr_period = 10
     multiplier = 1
 
-    data["H-L"] = data["High"] - data["Low"]
-    data["H-PC"] = abs(data["High"] - data["Close"].shift())
-    data["L-PC"] = abs(data["Low"] - data["Close"].shift())
+    df["H-L"] = df["High"] - df["Low"]
+    df["H-PC"] = abs(df["High"] - df["Close"].shift())
+    df["L-PC"] = abs(df["Low"] - df["Close"].shift())
 
-    tr = data[["H-L","H-PC","L-PC"]].max(axis=1)
+    tr = df[["H-L","H-PC","L-PC"]].max(axis=1)
     atr = tr.rolling(atr_period).mean()
 
-    data["upper"] = data["Close"] - multiplier * atr
-    data["lower"] = data["Close"] + multiplier * atr
+    df["upper"] = df["Close"] - multiplier * atr
+    df["lower"] = df["Close"] + multiplier * atr
 
-    data["trend"] = 0
-    data.loc[data["Close"] > data["upper"],"trend"] = 1
-    data.loc[data["Close"] < data["lower"],"trend"] = -1
+    df["trend"] = 0
+    df.loc[df["Close"] > df["upper"],"trend"] = 1
+    df.loc[df["Close"] < df["lower"],"trend"] = -1
 
-    data["trend_shift"] = data["trend"].diff()
+    df["trend_shift"] = df["trend"].diff()
 
-    buy = data[data["trend_shift"] == 2]
-    sell = data[data["trend_shift"] == -2]
-
-# limit rows
-data = data.tail(rows)
+    buy = df[df["trend_shift"] == 2]
+    sell = df[df["trend_shift"] == -2]
 
 # -----------------------------
 # 2D CHART
@@ -114,11 +112,11 @@ if dimension == "2D":
 
         fig.add_trace(
             go.Candlestick(
-                x=data.index,
-                open=data["Open"],
-                high=data["High"],
-                low=data["Low"],
-                close=data["Close"],
+                x=df["Date"],
+                open=df["Open"],
+                high=df["High"],
+                low=df["Low"],
+                close=df["Close"],
                 name="Candles"
             )
         )
@@ -127,39 +125,31 @@ if dimension == "2D":
 
         fig.add_trace(
             go.Scatter(
-                x=data.index,
-                y=data["Close"],
+                x=df["Date"],
+                y=df["Close"],
                 mode="lines",
                 name="Close Price"
             )
         )
 
-    # BUY
+    # BUY markers
     fig.add_trace(
         go.Scatter(
-            x=buy.index,
+            x=buy["Date"],
             y=buy["Close"],
             mode="markers",
-            marker=dict(
-                symbol="triangle-up",
-                size=12,
-                color="green"
-            ),
+            marker=dict(symbol="triangle-up",size=12,color="green"),
             name="Buy"
         )
     )
 
-    # SELL
+    # SELL markers
     fig.add_trace(
         go.Scatter(
-            x=sell.index,
+            x=sell["Date"],
             y=sell["Close"],
             mode="markers",
-            marker=dict(
-                symbol="triangle-down",
-                size=12,
-                color="red"
-            ),
+            marker=dict(symbol="triangle-down",size=12,color="red"),
             name="Sell"
         )
     )
@@ -170,56 +160,47 @@ if dimension == "2D":
         yaxis_title="Price"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig,use_container_width=True)
 
 # -----------------------------
 # 3D CHART
 # -----------------------------
 else:
 
-    data["Index"] = np.arange(len(data))
+    df["index3d"] = np.arange(len(df))
 
     fig = go.Figure()
 
-    # PRICE LINE
     fig.add_trace(
         go.Scatter3d(
-            x=data.index,
-            y=data["Index"],
-            z=data["Close"],
+            x=df["Date"],
+            y=df["index3d"],
+            z=df["Close"],
             mode="lines",
             name="Price"
         )
     )
 
-    # BUY SIGNALS
+    # BUY
     fig.add_trace(
         go.Scatter3d(
-            x=buy.index,
-            y=[data.loc[i,"Index"] for i in buy.index],
+            x=buy["Date"],
+            y=buy.index,
             z=buy["Close"],
             mode="markers",
-            marker=dict(
-                size=6,
-                color="green",
-                symbol="diamond"
-            ),
+            marker=dict(size=6,color="green"),
             name="Buy"
         )
     )
 
-    # SELL SIGNALS
+    # SELL
     fig.add_trace(
         go.Scatter3d(
-            x=sell.index,
-            y=[data.loc[i,"Index"] for i in sell.index],
+            x=sell["Date"],
+            y=sell.index,
             z=sell["Close"],
             mode="markers",
-            marker=dict(
-                size=6,
-                color="red",
-                symbol="diamond"
-            ),
+            marker=dict(size=6,color="red"),
             name="Sell"
         )
     )
@@ -228,30 +209,28 @@ else:
         height=800,
         scene=dict(
             xaxis_title="Date",
-            yaxis_title="Time Index",
+            yaxis_title="Index",
             zaxis_title="Price"
         )
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig,use_container_width=True)
 
 # -----------------------------
 # SIGNAL TABLE
 # -----------------------------
-
 st.subheader("Recent Signals")
 
-signal_df = pd.concat([buy, sell]).sort_index()
+signals = pd.concat([buy,sell]).sort_values("Date")
 
-if len(signal_df) > 0:
+if len(signals) > 0:
 
-    signal_df = signal_df[["Close"]].copy()
-    signal_df["Signal"] = "Buy"
+    signals = signals[["Date","Close"]].copy()
 
-    signal_df.loc[sell.index,"Signal"] = "Sell"
+    signals["Signal"] = "Buy"
+    signals.loc[sell.index,"Signal"] = "Sell"
 
-    st.dataframe(signal_df.tail(20))
+    st.dataframe(signals.tail(20))
 
 else:
-
     st.info("No signals generated.")
