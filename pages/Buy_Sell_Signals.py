@@ -8,29 +8,29 @@ st.set_page_config(page_title="Buy Sell Signals", layout="wide")
 
 st.title("📈 Buy / Sell Signal Charts")
 
-# -----------------------------
+# -----------------------
 # LOAD TICKERS
-# -----------------------------
+# -----------------------
 @st.cache_data
 def load_tickers():
     df = pd.read_csv("data/EQUITY_L.csv")
-    return df["SYMBOL"].dropna().tolist()
+    return df["SYMBOL"].dropna().unique().tolist()
 
 tickers = load_tickers()
 
-# -----------------------------
-# SIDEBAR
-# -----------------------------
-st.sidebar.header("Chart Settings")
+# -----------------------
+# SIDEBAR CONTROLS
+# -----------------------
+st.sidebar.header("Settings")
 
-ticker = st.sidebar.selectbox("Select Stock", tickers)
+ticker = st.sidebar.selectbox("Stock", tickers)
 
 timeframe = st.sidebar.selectbox(
-    "Time Frame",
+    "Timeframe",
     ["1mo","3mo","6mo","1y","2y","5y"]
 )
 
-rows = st.sidebar.slider("Rows to display",50,500,200)
+rows = st.sidebar.slider("Rows to Display", 50, 500, 200)
 
 strategy = st.sidebar.selectbox(
     "Signal Strategy",
@@ -47,23 +47,29 @@ dimension = st.sidebar.selectbox(
     ["2D","3D"]
 )
 
-# -----------------------------
+# -----------------------
 # DOWNLOAD DATA
-# -----------------------------
+# -----------------------
 symbol = ticker + ".NS"
 
 df = yf.download(symbol, period=timeframe)
 
-df = df.dropna()
+if df.empty:
+    st.error("No data found.")
+    st.stop()
 
-df = df.tail(rows).copy()
+# FIX MULTIINDEX COLUMNS
+if isinstance(df.columns, pd.MultiIndex):
+    df.columns = df.columns.get_level_values(0)
 
-# reset index for 3D stability
-df.reset_index(inplace=True)
+df = df.reset_index()
 
-# -----------------------------
+df = df.tail(rows)
+
+# -----------------------
 # SIGNAL CALCULATIONS
-# -----------------------------
+# -----------------------
+
 if strategy == "Golden Cross":
 
     df["SMA20"] = df["Close"].rolling(20).mean()
@@ -101,9 +107,9 @@ else:
     buy = df[df["trend_shift"] == 2]
     sell = df[df["trend_shift"] == -2]
 
-# -----------------------------
+# -----------------------
 # 2D CHART
-# -----------------------------
+# -----------------------
 if dimension == "2D":
 
     fig = go.Figure()
@@ -138,7 +144,11 @@ if dimension == "2D":
             x=buy["Date"],
             y=buy["Close"],
             mode="markers",
-            marker=dict(symbol="triangle-up",size=12,color="green"),
+            marker=dict(
+                symbol="triangle-up",
+                size=12,
+                color="green"
+            ),
             name="Buy"
         )
     )
@@ -149,7 +159,11 @@ if dimension == "2D":
             x=sell["Date"],
             y=sell["Close"],
             mode="markers",
-            marker=dict(symbol="triangle-down",size=12,color="red"),
+            marker=dict(
+                symbol="triangle-down",
+                size=12,
+                color="red"
+            ),
             name="Sell"
         )
     )
@@ -160,11 +174,11 @@ if dimension == "2D":
         yaxis_title="Price"
     )
 
-    st.plotly_chart(fig,use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
 
-# -----------------------------
+# -----------------------
 # 3D CHART
-# -----------------------------
+# -----------------------
 else:
 
     df["index3d"] = np.arange(len(df))
@@ -181,26 +195,30 @@ else:
         )
     )
 
-    # BUY
     fig.add_trace(
         go.Scatter3d(
             x=buy["Date"],
             y=buy.index,
             z=buy["Close"],
             mode="markers",
-            marker=dict(size=6,color="green"),
+            marker=dict(
+                size=6,
+                color="green"
+            ),
             name="Buy"
         )
     )
 
-    # SELL
     fig.add_trace(
         go.Scatter3d(
             x=sell["Date"],
             y=sell.index,
             z=sell["Close"],
             mode="markers",
-            marker=dict(size=6,color="red"),
+            marker=dict(
+                size=6,
+                color="red"
+            ),
             name="Sell"
         )
     )
@@ -214,16 +232,16 @@ else:
         )
     )
 
-    st.plotly_chart(fig,use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
 
-# -----------------------------
+# -----------------------
 # SIGNAL TABLE
-# -----------------------------
+# -----------------------
 st.subheader("Recent Signals")
 
 signals = pd.concat([buy,sell]).sort_values("Date")
 
-if len(signals) > 0:
+if not signals.empty:
 
     signals = signals[["Date","Close"]].copy()
 
