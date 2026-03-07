@@ -1,303 +1,257 @@
-# pages/Buy_Sell_Signals.py
-# Strategy Signals Dashboard (Golden Cross + UT Bot + 3D Visualization)
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
-import os
 
-st.set_page_config(page_title="Strategy Signals", layout="wide")
-st.title("📈 Strategy Signals Dashboard")
+st.set_page_config(page_title="Buy / Sell Signals", layout="wide")
 
-# -------------------------------------------------
-# Load NSE Equity Master
-# -------------------------------------------------
+st.title("📈 Buy / Sell Signal Charts")
+
+# -----------------------------
+# LOAD TICKERS
+# -----------------------------
 @st.cache_data
-def load_equity_master():
-    base_path = os.path.dirname(os.path.dirname(__file__))
-    file_path = os.path.join(base_path, "data", "EQUITY_L.csv")
+def load_tickers():
+    df = pd.read_csv("data/EQUITY_L.csv")
+    return df["SYMBOL"].dropna().unique().tolist()
 
-    if not os.path.exists(file_path):
-        st.error("EQUITY_L.csv not found.")
-        st.stop()
+tickers = load_tickers()
 
-    df = pd.read_csv(file_path)
-    df = df.dropna(subset=["SYMBOL"])
-    df["Ticker"] = df["SYMBOL"].astype(str) + ".NS"
-    return df
+# -----------------------------
+# SIDEBAR
+# -----------------------------
+st.sidebar.header("Chart Settings")
 
+ticker = st.sidebar.selectbox("Select Stock", tickers)
 
-equity_df = load_equity_master()
+timeframe = st.sidebar.selectbox(
+    "Time Frame",
+    ["1mo","3mo","6mo","1y","2y","5y"]
+)
 
-# -------------------------------------------------
-# Sidebar Controls
-# -------------------------------------------------
-with st.sidebar:
+rows = st.sidebar.slider("Number of rows to display",50,500,200)
 
-    st.header("Market Settings")
+signal_type = st.sidebar.selectbox(
+    "Signal Strategy",
+    ["Golden Cross","UT Bot"]
+)
 
-    ticker = st.selectbox(
-        "Select Ticker",
-        sorted(equity_df["Ticker"].unique())
-    )
+chart_type = st.sidebar.selectbox(
+    "Chart Style",
+    ["Line","Candlestick"]
+)
 
-    period = st.selectbox(
-        "Historical Period",
-        ["1mo","3mo","6mo","1y","2y","5y"],
-        index=3
-    )
+dimension = st.sidebar.selectbox(
+    "Chart Dimension",
+    ["2D","3D"]
+)
 
-    interval = st.selectbox(
-        "Timeframe",
-        ["1d","1h","30m","15m","5m"],
-        index=0
-    )
+# -----------------------------
+# DOWNLOAD DATA
+# -----------------------------
+symbol = ticker + ".NS"
 
-    chart_type = st.selectbox(
-        "Chart Type",
-        ["Candlestick","Line"]
-    )
+df = yf.download(symbol, period=timeframe)
 
-    dimension = st.selectbox(
-        "Visualization",
-        ["2D Chart","3D Chart"]
-    )
+df = df.dropna()
 
-    st.divider()
+# -----------------------------
+# SIGNAL CALCULATIONS
+# -----------------------------
 
-    st.header("Strategy")
+data = df.copy()
 
-    strategy = st.selectbox(
-        "Choose Strategy",
-        ["Golden Cross","UT Bot Alerts"]
-    )
+# GOLDEN CROSS
+if signal_type == "Golden Cross":
 
-    st.divider()
+    data["20_SMA"] = data["Close"].rolling(20).mean()
+    data["50_SMA"] = data["Close"].rolling(50).mean()
 
-    st.header("Golden Cross Settings")
+    data["Signal"] = 0
+    data.loc[data["20_SMA"] > data["50_SMA"],"Signal"] = 1
+    data["Position"] = data["Signal"].diff()
 
-    short_window = st.slider("Short SMA",5,50,20)
-    long_window = st.slider("Long SMA",20,200,50)
+    buy = data[data["Position"] == 1]
+    sell = data[data["Position"] == -1]
 
-    st.divider()
-
-    st.header("UT Bot Settings")
-
-    atr_period = st.slider("ATR Period",5,30,10)
-    multiplier = st.slider("ATR Multiplier",0.5,5.0,1.0)
-
-    data_points = st.slider("Recent Data Points",100,1000,300)
-
-# -------------------------------------------------
-# Load Data
-# -------------------------------------------------
-@st.cache_data(ttl=900)
-def load_stock(ticker,period,interval):
-
-    df = yf.download(
-        ticker,
-        period=period,
-        interval=interval,
-        progress=False
-    )
-
-    if isinstance(df.columns,pd.MultiIndex):
-        df.columns=df.columns.get_level_values(0)
-
-    return df
-
-
-df = load_stock(ticker,period,interval)
-
-if df.empty:
-    st.error("No data available.")
-    st.stop()
-
-close = df["Close"]
-
-# -------------------------------------------------
-# Golden Cross
-# -------------------------------------------------
-df["SMA_short"] = close.rolling(short_window).mean()
-df["SMA_long"] = close.rolling(long_window).mean()
-
-df["Signal"] = 0
-df.loc[df["SMA_short"] > df["SMA_long"],"Signal"] = 1
-df["Position"] = df["Signal"].diff()
-
-# -------------------------------------------------
 # UT BOT
-# -------------------------------------------------
-high=df["High"]
-low=df["Low"]
+else:
 
-df["H-L"]=high-low
-df["H-PC"]=abs(high-close.shift())
-df["L-PC"]=abs(low-close.shift())
+    atr_period = 10
+    multiplier = 1
 
-tr=df[["H-L","H-PC","L-PC"]].max(axis=1)
-atr=tr.rolling(atr_period).mean()
+    data["H-L"] = data["High"] - data["Low"]
+    data["H-PC"] = abs(data["High"] - data["Close"].shift())
+    data["L-PC"] = abs(data["Low"] - data["Close"].shift())
 
-df["UT_Stop"]=close-multiplier*atr
+    tr = data[["H-L","H-PC","L-PC"]].max(axis=1)
+    atr = tr.rolling(atr_period).mean()
 
-df["UT_Signal"]=0
-df.loc[close>df["UT_Stop"],"UT_Signal"]=1
+    data["upper"] = data["Close"] - multiplier * atr
+    data["lower"] = data["Close"] + multiplier * atr
 
-df["UT_Position"]=df["UT_Signal"].diff()
+    data["trend"] = 0
+    data.loc[data["Close"] > data["upper"],"trend"] = 1
+    data.loc[data["Close"] < data["lower"],"trend"] = -1
 
-# -------------------------------------------------
-# Recent Data
-# -------------------------------------------------
-rdt=df.tail(data_points)
-rdt["t"]=np.arange(len(rdt))
+    data["trend_shift"] = data["trend"].diff()
 
-buy_gc=rdt[rdt["Position"]==1]
-sell_gc=rdt[rdt["Position"]==-1]
+    buy = data[data["trend_shift"] == 2]
+    sell = data[data["trend_shift"] == -2]
 
-buy_ut=rdt[rdt["UT_Position"]==1]
-sell_ut=rdt[rdt["UT_Position"]==-1]
+# limit rows
+data = data.tail(rows)
 
-# -------------------------------------------------
+# -----------------------------
 # 2D CHART
-# -------------------------------------------------
-if dimension=="2D Chart":
+# -----------------------------
+if dimension == "2D":
 
-    fig=go.Figure()
+    fig = go.Figure()
 
-    if chart_type=="Candlestick":
+    if chart_type == "Candlestick":
 
-        fig.add_trace(go.Candlestick(
-            x=rdt.index,
-            open=rdt["Open"],
-            high=rdt["High"],
-            low=rdt["Low"],
-            close=rdt["Close"],
-            name="Price"
-        ))
-
-    else:
-
-        fig.add_trace(go.Scatter(
-            x=rdt.index,
-            y=rdt["Close"],
-            line=dict(color="black"),
-            name="Close"
-        ))
-
-    if strategy=="Golden Cross":
-
-        fig.add_trace(go.Scatter(
-            x=rdt.index,
-            y=rdt["SMA_short"],
-            line=dict(color="blue"),
-            name="Short SMA"
-        ))
-
-        fig.add_trace(go.Scatter(
-            x=rdt.index,
-            y=rdt["SMA_long"],
-            line=dict(color="green"),
-            name="Long SMA"
-        ))
-
-        fig.add_trace(go.Scatter(
-            x=buy_gc.index,
-            y=buy_gc["Close"],
-            mode="markers",
-            marker=dict(symbol="triangle-up",size=14,color="green"),
-            name="Buy"
-        ))
-
-        fig.add_trace(go.Scatter(
-            x=sell_gc.index,
-            y=sell_gc["Close"],
-            mode="markers",
-            marker=dict(symbol="triangle-down",size=14,color="red"),
-            name="Sell"
-        ))
-
-        signal_df = rdt[(rdt["Position"]==1)|(rdt["Position"]==-1)].copy()
-        signal_df["Signal"]=signal_df["Position"].apply(lambda x:"BUY" if x==1 else "SELL")
+        fig.add_trace(
+            go.Candlestick(
+                x=data.index,
+                open=data["Open"],
+                high=data["High"],
+                low=data["Low"],
+                close=data["Close"],
+                name="Candles"
+            )
+        )
 
     else:
 
-        fig.add_trace(go.Scatter(
-            x=rdt.index,
-            y=rdt["UT_Stop"],
-            line=dict(color="orange"),
-            name="UT Stop"
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=data.index,
+                y=data["Close"],
+                mode="lines",
+                name="Close Price"
+            )
+        )
 
-        fig.add_trace(go.Scatter(
-            x=buy_ut.index,
-            y=buy_ut["Close"],
+    # BUY
+    fig.add_trace(
+        go.Scatter(
+            x=buy.index,
+            y=buy["Close"],
             mode="markers",
-            marker=dict(symbol="triangle-up",size=14,color="green"),
+            marker=dict(
+                symbol="triangle-up",
+                size=12,
+                color="green"
+            ),
             name="Buy"
-        ))
+        )
+    )
 
-        fig.add_trace(go.Scatter(
-            x=sell_ut.index,
-            y=sell_ut["Close"],
+    # SELL
+    fig.add_trace(
+        go.Scatter(
+            x=sell.index,
+            y=sell["Close"],
             mode="markers",
-            marker=dict(symbol="triangle-down",size=14,color="red"),
+            marker=dict(
+                symbol="triangle-down",
+                size=12,
+                color="red"
+            ),
             name="Sell"
-        ))
-
-        signal_df = rdt[(rdt["UT_Position"]==1)|(rdt["UT_Position"]==-1)].copy()
-        signal_df["Signal"]=signal_df["UT_Position"].apply(lambda x:"BUY" if x==1 else "SELL")
+        )
+    )
 
     fig.update_layout(
-        height=750,
-        title=f"{ticker} — {strategy}",
+        height=700,
         xaxis_title="Date",
         yaxis_title="Price"
     )
 
-    st.plotly_chart(fig,use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
 
-# -------------------------------------------------
+# -----------------------------
 # 3D CHART
-# -------------------------------------------------
+# -----------------------------
 else:
 
-    returns=rdt["Close"].pct_change()*100
-    volatility=returns.rolling(20).std()*np.sqrt(252)
+    data["Index"] = np.arange(len(data))
 
-    fig=go.Figure()
+    fig = go.Figure()
 
-    fig.add_trace(go.Scatter3d(
-        x=rdt["t"],
-        y=rdt["Close"],
-        z=volatility,
-        mode="lines+markers",
-        marker=dict(
-            size=4,
-            color=returns,
-            colorscale="Viridis",
-            colorbar=dict(title="Return %")
-        ),
-        name="Price Path"
-    ))
-
-    fig.update_layout(
-        height=750,
-        title=f"{ticker} — 3D Market Structure",
-        scene=dict(
-            xaxis_title="Time",
-            yaxis_title="Price",
-            zaxis_title="Volatility"
+    # PRICE LINE
+    fig.add_trace(
+        go.Scatter3d(
+            x=data.index,
+            y=data["Index"],
+            z=data["Close"],
+            mode="lines",
+            name="Price"
         )
     )
 
-    st.plotly_chart(fig,use_container_width=True)
+    # BUY SIGNALS
+    fig.add_trace(
+        go.Scatter3d(
+            x=buy.index,
+            y=[data.loc[i,"Index"] for i in buy.index],
+            z=buy["Close"],
+            mode="markers",
+            marker=dict(
+                size=6,
+                color="green",
+                symbol="diamond"
+            ),
+            name="Buy"
+        )
+    )
 
-# -------------------------------------------------
+    # SELL SIGNALS
+    fig.add_trace(
+        go.Scatter3d(
+            x=sell.index,
+            y=[data.loc[i,"Index"] for i in sell.index],
+            z=sell["Close"],
+            mode="markers",
+            marker=dict(
+                size=6,
+                color="red",
+                symbol="diamond"
+            ),
+            name="Sell"
+        )
+    )
+
+    fig.update_layout(
+        height=800,
+        scene=dict(
+            xaxis_title="Date",
+            yaxis_title="Time Index",
+            zaxis_title="Price"
+        )
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+# -----------------------------
 # SIGNAL TABLE
-# -------------------------------------------------
-st.markdown("## 📊 Signal Log")
+# -----------------------------
 
-signal_df=signal_df[["Close","Signal"]]
-st.dataframe(signal_df)
+st.subheader("Recent Signals")
+
+signal_df = pd.concat([buy, sell]).sort_index()
+
+if len(signal_df) > 0:
+
+    signal_df = signal_df[["Close"]].copy()
+    signal_df["Signal"] = "Buy"
+
+    signal_df.loc[sell.index,"Signal"] = "Sell"
+
+    st.dataframe(signal_df.tail(20))
+
+else:
+
+    st.info("No signals generated.")
