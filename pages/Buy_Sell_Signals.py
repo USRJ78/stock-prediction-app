@@ -66,7 +66,6 @@ if df.empty:
     st.error("No data found")
     st.stop()
 
-# Fix multiindex columns
 if isinstance(df.columns, pd.MultiIndex):
     df.columns = df.columns.get_level_values(0)
 
@@ -82,7 +81,7 @@ df["Volatility"] = df["Returns"].rolling(10).std()
 df["Momentum"] = df["Close"] - df["Close"].shift(10)
 
 # -------------------------
-# GOLDEN CROSS
+# SIGNAL STRATEGIES
 # -------------------------
 if strategy == "Golden Cross":
 
@@ -97,9 +96,6 @@ if strategy == "Golden Cross":
     buy = df[df["Position"] == 1]
     sell = df[df["Position"] == -1]
 
-# -------------------------
-# UT BOT
-# -------------------------
 else:
 
     atr_period = 1
@@ -212,50 +208,134 @@ if dimension == "2D":
     st.plotly_chart(fig,use_container_width=True)
 
 # -------------------------
-# 3D CHART
+# BACKTEST SECTION
 # -------------------------
+st.sidebar.header("Backtest Settings")
+
+investment = st.sidebar.number_input("Investment Amount ₹",1000,10000000,100000)
+
+start_date = st.sidebar.date_input("Start Date",df["Date"].min())
+
+end_date = st.sidebar.date_input("End Date",df["Date"].max())
+
+bt_df = df[(df["Date"] >= pd.to_datetime(start_date)) &
+           (df["Date"] <= pd.to_datetime(end_date))].copy()
+
+cash = investment
+shares = 0
+
+equity_curve = []
+trades = []
+
+for i in range(len(bt_df)):
+
+    row = bt_df.iloc[i]
+
+    if row["Signal"] == 1 and cash > 0:
+
+        shares = cash / row["Close"]
+        cash = 0
+
+        trades.append({
+            "Date":row["Date"],
+            "Type":"BUY",
+            "Price":row["Close"]
+        })
+
+    elif row["Signal"] == -1 and shares > 0:
+
+        cash = shares * row["Close"]
+        shares = 0
+
+        trades.append({
+            "Date":row["Date"],
+            "Type":"SELL",
+            "Price":row["Close"],
+            "Value":cash
+        })
+
+    portfolio_value = cash if shares == 0 else shares * row["Close"]
+    equity_curve.append(portfolio_value)
+
+bt_df["Equity"] = equity_curve
+
+final_value = equity_curve[-1]
+
+profit = final_value - investment
+
+return_pct = (profit/investment)*100
+
+# -------------------------
+# MAX DRAWDOWN
+# -------------------------
+rolling_max = bt_df["Equity"].cummax()
+drawdown = bt_df["Equity"] / rolling_max - 1
+max_drawdown = drawdown.min() * 100
+
+# -------------------------
+# WIN RATE
+# -------------------------
+wins = 0
+losses = 0
+
+for i in range(1,len(trades)):
+
+    if trades[i]["Type"] == "SELL" and trades[i-1]["Type"] == "BUY":
+
+        buy_price = trades[i-1]["Price"]
+        sell_price = trades[i]["Price"]
+
+        if sell_price > buy_price:
+            wins += 1
+        else:
+            losses += 1
+
+total_trades = wins + losses
+win_rate = (wins/total_trades)*100 if total_trades > 0 else 0
+
+# -------------------------
+# PERFORMANCE METRICS
+# -------------------------
+st.subheader("Strategy Performance")
+
+col1,col2,col3,col4 = st.columns(4)
+
+col1.metric("Initial Investment",f"₹{investment:,.0f}")
+col2.metric("Final Value",f"₹{final_value:,.0f}")
+col3.metric("Return %",f"{return_pct:.2f}%")
+col4.metric("Max Drawdown",f"{max_drawdown:.2f}%")
+
+st.metric("Win Rate",f"{win_rate:.2f}%")
+
+# -------------------------
+# EQUITY CURVE
+# -------------------------
+st.subheader("Portfolio Growth")
+
+fig2 = go.Figure()
+
+fig2.add_trace(go.Scatter(
+    x=bt_df["Date"],
+    y=bt_df["Equity"],
+    mode="lines",
+    name="Portfolio Value"
+))
+
+fig2.update_layout(height=500,xaxis_title="Date",yaxis_title="Portfolio Value")
+
+st.plotly_chart(fig2,use_container_width=True)
+
+# -------------------------
+# TRADE HISTORY
+# -------------------------
+st.subheader("Trade History")
+
+trades_df = pd.DataFrame(trades)
+
+if not trades_df.empty:
+    st.dataframe(trades_df)
 else:
-
-    z = df[z_axis]
-
-    fig = go.Figure()
-
-    fig.add_trace(go.Scatter3d(
-        x=df["Date"],
-        y=df["Close"],
-        z=z,
-        mode="lines",
-        name="Price Path"
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=buy["Date"],
-        y=buy["Close"],
-        z=buy[z_axis],
-        mode="markers",
-        marker=dict(size=6,color="green"),
-        name="Buy"
-    ))
-
-    fig.add_trace(go.Scatter3d(
-        x=sell["Date"],
-        y=sell["Close"],
-        z=sell[z_axis],
-        mode="markers",
-        marker=dict(size=6,color="red"),
-        name="Sell"
-    ))
-
-    fig.update_layout(
-        height=800,
-        scene=dict(
-            xaxis_title="Date",
-            yaxis_title="Price",
-            zaxis_title=z_axis
-        )
-    )
-
-    st.plotly_chart(fig,use_container_width=True)
+    st.info("No trades executed.")
 
 # -------------------------
 # SIGNAL TABLE
