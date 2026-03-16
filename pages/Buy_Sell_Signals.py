@@ -152,7 +152,7 @@ else:
     sell = df[df["Signal"] == -1]
 
 # -------------------------
-# 2D CHART
+# CHARTS
 # -------------------------
 if dimension == "2D":
 
@@ -208,7 +208,53 @@ if dimension == "2D":
     st.plotly_chart(fig,use_container_width=True)
 
 # -------------------------
-# BACKTEST SECTION
+# 3D CHART
+# -------------------------
+else:
+
+    z = df[z_axis]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter3d(
+        x=df["Date"],
+        y=df["Close"],
+        z=z,
+        mode="lines",
+        name="Price Path"
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=buy["Date"],
+        y=buy["Close"],
+        z=buy[z_axis],
+        mode="markers",
+        marker=dict(size=6,color="green"),
+        name="Buy"
+    ))
+
+    fig.add_trace(go.Scatter3d(
+        x=sell["Date"],
+        y=sell["Close"],
+        z=sell[z_axis],
+        mode="markers",
+        marker=dict(size=6,color="red"),
+        name="Sell"
+    ))
+
+    fig.update_layout(
+        height=800,
+        scene=dict(
+            xaxis_title="Date",
+            yaxis_title="Price",
+            zaxis_title=z_axis
+        )
+    )
+
+    st.plotly_chart(fig,use_container_width=True)
+
+# -------------------------
+# BACKTEST SETTINGS
 # -------------------------
 st.sidebar.header("Backtest Settings")
 
@@ -223,7 +269,6 @@ bt_df = df[(df["Date"] >= pd.to_datetime(start_date)) &
 
 cash = investment
 shares = 0
-
 equity_curve = []
 trades = []
 
@@ -236,23 +281,14 @@ for i in range(len(bt_df)):
         shares = cash / row["Close"]
         cash = 0
 
-        trades.append({
-            "Date":row["Date"],
-            "Type":"BUY",
-            "Price":row["Close"]
-        })
+        trades.append({"Date":row["Date"],"Type":"BUY","Price":row["Close"]})
 
     elif row["Signal"] == -1 and shares > 0:
 
         cash = shares * row["Close"]
         shares = 0
 
-        trades.append({
-            "Date":row["Date"],
-            "Type":"SELL",
-            "Price":row["Close"],
-            "Value":cash
-        })
+        trades.append({"Date":row["Date"],"Type":"SELL","Price":row["Close"],"Value":cash})
 
     portfolio_value = cash if shares == 0 else shares * row["Close"]
     equity_curve.append(portfolio_value)
@@ -260,38 +296,25 @@ for i in range(len(bt_df)):
 bt_df["Equity"] = equity_curve
 
 final_value = equity_curve[-1]
-
 profit = final_value - investment
-
 return_pct = (profit/investment)*100
 
-# -------------------------
-# MAX DRAWDOWN
-# -------------------------
 rolling_max = bt_df["Equity"].cummax()
-drawdown = bt_df["Equity"] / rolling_max - 1
-max_drawdown = drawdown.min() * 100
+drawdown = bt_df["Equity"]/rolling_max - 1
+max_drawdown = drawdown.min()*100
 
-# -------------------------
-# WIN RATE
-# -------------------------
 wins = 0
 losses = 0
 
 for i in range(1,len(trades)):
-
-    if trades[i]["Type"] == "SELL" and trades[i-1]["Type"] == "BUY":
-
-        buy_price = trades[i-1]["Price"]
-        sell_price = trades[i]["Price"]
-
-        if sell_price > buy_price:
-            wins += 1
+    if trades[i]["Type"]=="SELL" and trades[i-1]["Type"]=="BUY":
+        if trades[i]["Price"] > trades[i-1]["Price"]:
+            wins +=1
         else:
-            losses += 1
+            losses +=1
 
-total_trades = wins + losses
-win_rate = (wins/total_trades)*100 if total_trades > 0 else 0
+total_trades = wins+losses
+win_rate = (wins/total_trades)*100 if total_trades>0 else 0
 
 # -------------------------
 # PERFORMANCE METRICS
@@ -347,7 +370,6 @@ signals = pd.concat([buy,sell]).sort_values("Date")
 if not signals.empty:
 
     signals = signals[["Date","Close"]].copy()
-
     signals["Signal"] = "Buy"
     signals.loc[sell.index,"Signal"] = "Sell"
 
